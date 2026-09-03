@@ -1,0 +1,26 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # Check every 6 hours
+  workflow_dispatch:      # Allows manual trigger
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync upstream changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/doable-team/heyflare.git || git remote set-url upstream https://github.com/doable-team/heyflare.git
+          git fetch upstream main
+          git merge upstream/main -m "chore: sync upstream changes" || exit 0
+          git push origin main
