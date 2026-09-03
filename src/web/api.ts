@@ -1,5 +1,6 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import type * as T from "@shared/types";
+import { markDraftSent } from "./lib/sentDrafts";
 
 export class ApiError extends Error {
   status: number;
@@ -247,7 +248,7 @@ export function useScreener(enabled = true) {
 export function useScreenerDecide() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (p: { contact_id: string; decision: T.ScreenStatus }) => api.post<{ ok: boolean }>("/api/screener/decide", p),
+    mutationFn: (p: { contact_id: string; decision: T.ScreenStatus; scope?: T.DecisionScope }) => api.post<{ ok: boolean }>("/api/screener/decide", p),
     onMutate: ({ contact_id }) => {
       qc.setQueryData<{ senders: ScreenerSender[] }>(keys.screener, (old) => (old ? { senders: old.senders.filter((s) => s.contact.id !== contact_id) } : old));
     },
@@ -263,7 +264,7 @@ export function useScreenedOut() {
 
 // ---------- Contacts ----------
 export function useContacts(q: string, enabled = true) {
-  return useQuery({ queryKey: keys.contacts(q), queryFn: () => api.get<T.Contact[]>(`/api/contacts${qs({ q })}`), enabled, staleTime: 30_000 });
+  return useQuery({ queryKey: keys.contacts(q), queryFn: () => api.get<T.MergedContact[]>(`/api/contacts${qs({ q })}`), enabled, staleTime: 30_000 });
 }
 export interface Suggestion { email: string; name: string; avatar_url: string }
 export function useSuggest(q: string, enabled = true) {
@@ -272,14 +273,14 @@ export function useSuggest(q: string, enabled = true) {
 export function useContact(id: string | undefined, bucket?: string) {
   return useQuery({
     queryKey: [...keys.contact(id ?? ""), bucket ?? ""],
-    queryFn: () => api.get<{ contact: T.Contact; threads: T.ThreadSummary[] }>(`/api/contacts/${id}${qs({ bucket })}`),
+    queryFn: () => api.get<{ contact: T.MergedContact; threads: T.ThreadSummary[] }>(`/api/contacts/${id}${qs({ bucket })}`),
     enabled: !!id,
   });
 }
 export function useUpdateContact() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, ...body }: { id: string; name?: string; notes?: string; screen_status?: T.ScreenStatus; bundled?: boolean }) => api.patch<T.Contact>(`/api/contacts/${id}`, body),
+    mutationFn: ({ id, ...body }: { id: string; name?: string; notes?: string; screen_status?: T.ScreenStatus; bundled?: boolean; scope?: T.DecisionScope }) => api.patch<T.MergedContact>(`/api/contacts/${id}`, body),
     onSuccess: (_d, v) => {
       qc.invalidateQueries({ queryKey: ["contacts"] });
       qc.invalidateQueries({ queryKey: keys.contact(v.id) });
@@ -406,7 +407,9 @@ export interface SendResult {
   draft_id?: string;
 }
 export async function sendMail(payload: SendPayload): Promise<SendResult> {
-  return api.post<SendResult>("/api/send", payload);
+  const res = await api.post<SendResult>("/api/send", payload);
+  markDraftSent(payload.draft_id, res.thread_id);
+  return res;
 }
 
 // ---------- Accounts / settings ----------
@@ -614,4 +617,31 @@ export async function aiChatStream(body: { conversation_id?: string; message: st
       } catch {}
     }
   }
+}
+
+// ---------- Power through new ----------
+export interface PowerThroughResponse {
+  items: (T.ThreadSummary & { latest_message: T.Message | null })[];
+}
+export function usePowerThrough(enabled = true) {
+  return useQuery({
+    queryKey: ["power-through"],
+    queryFn: () => api.get<PowerThroughResponse>("/api/power-through"),
+    enabled,
+    // The queue is a snapshot you work through; refetching under the cursor would be jarring.
+    staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+  });
+}
+export function usePowerThroughMutations() {
+  const qc = useQueryClient();
+  return {
+    markAllSeen: useMutation({
+      mutationFn: (thread_ids: string[]) => api.post<{ ok: boolean; count: number }>("/api/power-through/seen", { thread_ids }),
+      onSuccess: () => {
+        qc.invalidateQueries({ queryKey: ["power-through"] });
+        invalidateMail(qc);
+      },
+    }),
+  };
 }

@@ -10,6 +10,7 @@ import { fmtSize, fmtDate } from "../lib/format";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useItemCursor } from "../lib/cardKeys";
 
 export type FileKind = "image" | "pdf" | "document" | "slides" | "spreadsheet" | "archive" | "video" | "audio" | "other";
 type Filter = "all" | "image" | "pdf" | "document" | "spreadsheet" | "archive" | "media" | "other";
@@ -52,12 +53,12 @@ function ext(name: string) {
   return m ? m[1].toUpperCase() : "";
 }
 
-export function FileTile({ f }: { f: Attachment; delay?: number }) {
+export function FileTile({ f, focused }: { f: Attachment; delay?: number; focused?: boolean }) {
   const k = kindOf(f.mime_type, f.filename);
   const url = attachmentUrl(f.message_id, f.id);
   const [broken, setBroken] = useState(false);
   return (
-    <article className="group relative flex flex-col min-w-0">
+    <article className={cn("group relative flex flex-col min-w-0 rounded-md scroll-mt-20", focused && "ring-1 ring-ring")}>
       <a href={url} target="_blank" rel="noopener" className="relative block aspect-[4/3] rounded-md bg-muted overflow-hidden">
         {k === "image" && !broken ? (
           <img src={url} alt={f.filename} loading="lazy" onError={() => setBroken(true)} className="absolute inset-0 w-full h-full object-cover" />
@@ -113,6 +114,10 @@ export default function FilesPage() {
   const [filter, setFilter] = useState<Filter>("all");
   const all = q.data?.pages.flatMap((p) => p.files) ?? [];
   const list = all.filter((f) => matches(kindOf(f.mime_type, f.filename), filter));
+  const { cursor } = useItemCursor({
+    count: list.length,
+    onOpen: (i) => list[i] && window.open(attachmentUrl(list[i].message_id, list[i].id), "_blank", "noopener"),
+  });
   const sentinel = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     const el = sentinel.current;
@@ -154,8 +159,10 @@ export default function FilesPage() {
         />
       )}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-3 gap-y-5 px-2">
-        {list.map((f) => (
-          <FileTile key={f.id} f={f} />
+        {list.map((f, i) => (
+          <div key={f.id} data-item-index={i} data-focused={cursor === i || undefined}>
+            <FileTile f={f} focused={cursor === i} />
+          </div>
         ))}
       </div>
       <div ref={sentinel} />

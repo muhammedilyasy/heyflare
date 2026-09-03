@@ -1,11 +1,12 @@
 {
   "name": "heyflare",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "dev:worker": "wrangler dev",
+    "prebuild": "node scripts/gen-version.mjs",
     "build": "vite build",
     "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.worker.json --noEmit",
     "deploy": "npm run build && wrangler deploy",

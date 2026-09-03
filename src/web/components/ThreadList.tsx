@@ -3,9 +3,11 @@ import { useNavigate } from "react-router-dom";
 import type { Bundle, ThreadSummary } from "@shared/types";
 import { useBulkAction, useBundleMutations, type ThreadAction } from "../api";
 import { useKeys } from "../lib/keys";
+import { useFocusRegion } from "../lib/focusStore";
+import { scrollPageBy } from "../lib/cardKeys";
 import { monthKey } from "../lib/format";
 import { BulkBar } from "./BulkBar";
-import { BundleRow } from "./BundleRow";
+import { BundleRow, bundleHref } from "./BundleRow";
 import { ThreadRow, type QuickAction } from "./ThreadRow";
 import { DateTimePicker } from "./DatePicker";
 import { EmptyState, ErrorState, SectionTitle, SkeletonRows } from "./EmptyState";
@@ -28,6 +30,11 @@ interface Section {
 }
 
 const OUT_MS = 240;
+
+type Item = { kind: "thread"; t: ThreadSummary; at: number } | { kind: "bundle"; b: Bundle; at: number };
+
+/** DOM hook shared by thread and bundle rows so the cursor can scroll either into view. */
+const rowId = (i: Item) => (i.kind === "thread" ? i.t.id : `b:${i.b.id}`);
 
 /**
  * Selectable, keyboard-navigable list. Accepts one or more sections that share
@@ -61,12 +68,28 @@ export function ThreadList({
   quickActions?: boolean;
 }) {
   const all = useMemo(() => sections.flatMap((s) => s.threads), [sections]);
+  // Threads + bundles interleaved by date, per section — the exact order rendered below, so the
+  // keyboard cursor and the screen never disagree.
+  const sectionItems = useMemo(
+    () =>
+      sections.map((s) => {
+        const items: Item[] = [
+          ...s.threads.map((t) => ({ kind: "thread" as const, t, at: t.last_message_at })),
+          ...(s.bundles ?? []).map((b) => ({ kind: "bundle" as const, b, at: b.last_message_at })),
+        ];
+        if (s.bundles?.length) items.sort((x, y) => y.at - x.at);
+        return items;
+      }),
+    [sections],
+  );
+  const items = useMemo(() => sectionItems.flat(), [sectionItems]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [cursor, setCursor] = useState(-1);
   const [bubbleFor, setBubbleFor] = useState<string[] | null>(null);
   const [leaving, setLeaving] = useState<Set<string>>(new Set());
   const lastClick = useRef<string | null>(null);
   const nav = useNavigate();
+  const region = useFocusRegion();
   const bulk = useBulkAction();
   const { toast } = useToast();
   const bundleM = useBundleMutations();
@@ -78,8 +101,11 @@ export function ThreadList({
       const next = new Set([...s].filter((id) => all.some((t) => t.id === id)));
       return next.size === s.size ? s : next;
     });
-    if (cursor >= all.length) setCursor(all.length - 1);
-  }, [all, cursor]);
+  }, [all]);
+
+  useEffect(() => {
+    if (cursor >= items.length) setCursor(items.length - 1);
+  }, [items, cursor]);
 
   const toggle = (id: string, shift: boolean) => {
     setSelected((s) => {
@@ -99,7 +125,10 @@ export function ThreadList({
     lastClick.current = id;
   };
 
-  const targets = () => (selected.size ? [...selected] : cursor >= 0 && all[cursor] ? [all[cursor].id] : []);
+  const cur = cursor >= 0 ? items[cursor] : undefined;
+  const curThread = cur?.kind === "thread" ? cur.t : undefined;
+  // Bundles take a cursor slot but no thread actions: with one focused, targets() is empty and act() no-ops.
+  const targets = () => (selected.size ? [...selected] : curThread ? [curThread.id] : []);
 
   /** Animate rows out, then run the mutation. */
   const act = useCallback(
@@ -128,15 +157,29 @@ export function ThreadList({
     else if (q === "trash") act([id], { action: "move", bucket: "trash" }, "Moved to trash");
   };
 
+  const open = () => {
+    if (!cur) return;
+    nav(cur.kind === "thread" ? `/t/${cur.t.id}` : bundleHref(cur.b));
+  };
+
+  // With nothing to walk (an empty list), the arrows scroll the page instead of doing nothing.
+  const step = (delta: number) => {
+    if (!items.length) {
+      scrollPageBy(delta * 0.25);
+      return;
+    }
+    setCursor((c) => Math.min(Math.max(c + delta, 0), items.length - 1));
+  };
+
   useKeys(
     {
-      j: () => setCursor((c) => Math.min(c + 1, all.length - 1)),
-      k: () => setCursor((c) => Math.max(c - 1, 0)),
-      ArrowDown: () => setCursor((c) => Math.min(c + 1, all.length - 1)),
-      ArrowUp: () => setCursor((c) => Math.max(c - 1, 0)),
-      Enter: () => cursor >= 0 && all[cursor] && nav(`/t/${all[cursor].id}`),
-      o: () => cursor >= 0 && all[cursor] && nav(`/t/${all[cursor].id}`),
-      x: () => cursor >= 0 && all[cursor] && toggle(all[cursor].id, false),
+      j: () => step(1),
+      k: () => step(-1),
+      ArrowDown: () => step(1),
+      ArrowUp: () => step(-1),
+      Enter: () => open(),
+      o: () => open(),
+      x: () => curThread && toggle(curThread.id, false),
       l: () => act(targets(), { action: "reply_later", on: true }, "Added to Reply Later"),
       a: () => act(targets(), { action: "set_aside", on: true }, "Set aside"),
       z: () => { const ids = targets(); if (ids.length) setBubbleFor(ids); },
@@ -144,14 +187,15 @@ export function ThreadList({
       u: () => act(targets(), { action: "mark_unread" }, undefined, false),
       Escape: () => setSelected(new Set()),
     },
-    keysEnabled,
+    // While the sidebar owns the arrows, the list stays put.
+    keysEnabled && region === "content",
   );
 
   useEffect(() => {
-    if (cursor < 0) return;
-    const el = document.querySelector(`[data-thread-id="${all[cursor]?.id}"]`);
-    el?.scrollIntoView({ block: "nearest" });
-  }, [cursor, all]);
+    const it = cursor >= 0 ? items[cursor] : undefined;
+    if (!it) return;
+    document.querySelector(`[data-row-id="${rowId(it)}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [cursor, items]);
 
   if (error) return <ErrorState error={error} onRetry={onRetry} />;
   if (loading && all.length === 0) return <SkeletonRows compact={compact} />;
@@ -163,19 +207,21 @@ export function ThreadList({
       {sections.map((s, si) => {
         const rows: ReactNode[] = [];
         let lastMonth = "";
-        // Interleave bundles with threads by date; bundles are not selectable and don't take a cursor slot.
-        const items: ({ kind: "thread"; t: ThreadSummary; at: number } | { kind: "bundle"; b: Bundle; at: number })[] = [
-          ...s.threads.map((t) => ({ kind: "thread" as const, t, at: t.last_message_at })),
-          ...(s.bundles ?? []).map((b) => ({ kind: "bundle" as const, b, at: b.last_message_at })),
-        ];
-        if (s.bundles?.length) items.sort((a, b) => b.at - a.at);
-        for (const item of items) {
+        for (const item of sectionItems[si]) {
+          const i = idx++;
           if (item.kind === "bundle") {
-            rows.push(<BundleRow key={"b" + item.b.id} bundle={item.b} compact={compact} onSeen={(b) => markSeen(b)} />);
+            rows.push(
+              <BundleRow
+                key={"b" + item.b.id}
+                bundle={item.b}
+                compact={compact}
+                focused={i === cursor && region === "content"}
+                onSeen={(b) => markSeen(b)}
+              />,
+            );
             continue;
           }
           const t = item.t;
-          const i = idx++;
           if (groupByMonth) {
             const m = monthKey(t.last_message_at);
             if (m !== lastMonth) {
@@ -192,7 +238,7 @@ export function ThreadList({
               key={t.id}
               thread={t}
               selected={selected.has(t.id)}
-              focused={i === cursor}
+              focused={i === cursor && region === "content"}
               onSelect={toggle}
               compact={compact}
               showBucket={showBucket}

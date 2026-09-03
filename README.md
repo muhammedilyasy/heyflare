@@ -36,6 +36,7 @@ lives in a resizable side panel and can see the thread you're reading.
 
 - **The Screener** — every first-time sender waits for a yes/no. Decide once per person, across all your accounts.
 - **Imbox, The Feed, Paper Trail** — people, newsletters, receipts. "New for you" vs "Previously seen".
+- **Power through new** — the whole "New for you" queue stacked on one page: reply, defer or file each one, `o` to start.
 - **Reply Later, Set Aside, Bubble Up** — trays docked in the Imbox, Focus & Reply mode, snooze with presets.
 - **Bundles** — collapse a chatty sender into one row per batch; read the batch like a feed.
 - **Unified inbox** across every connected account, with per-account glyphs and a From picker in compose.
@@ -125,6 +126,26 @@ A native macOS app (Tauri 2, WebKit, ~10 MB) lives in [`apps/mac`](apps/mac). It
 native menu bar and shortcuts, dock badge, notifications, external links in your browser, and auto-updates. Download the
 DMG from [Releases](https://github.com/doable-team/heyflare/releases) or build it yourself (`cd apps/mac && npm install && npm run build`).
 
+Downloaded builds aren't notarized yet, so macOS may say the app is "damaged". Clear the quarantine flag once:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/heyflare.app
+```
+
+## Updating
+
+heyflare tells you when a new version is out: an **Update available** row appears at the bottom of the sidebar, and the
+dialog explains what changed and how to get it.
+
+- **Mac app** — press **Update and restart**. It downloads, installs and relaunches itself.
+- **Created with npm** — `npx create-heyflare deploy`
+- **Cloned repo** — `git pull && npm run deploy`
+- **Fork + Workers Builds** — merge upstream and push; Cloudflare deploys it.
+
+Your data is never touched: mail, contacts, screener decisions, settings, 2FA and AI memory live in your D1 database, and
+new database migrations apply themselves on the first request after a deploy. Full details, including rollback:
+[`docs/UPDATING.md`](docs/UPDATING.md).
+
 ## How mail flows
 - Connecting Gmail imports **nothing**. It records Gmail's history cursor and only mail that arrives afterwards syncs.
 - Every first-time sender waits in the **Screener**. Decisions are per person and apply across all your accounts.
@@ -157,6 +178,7 @@ TOTP (Google Authenticator, 1Password, Authy…) with 10 single-use recovery cod
 ## Docs
 - `API.md` — the worker/web API contract.
 - `DESIGN.md` — the design system (Notion-minimal, shadcn, mobile spec).
+- [`docs/UPDATING.md`](docs/UPDATING.md) — what an update changes, how to update, how to roll back.
 
 ## License
 MIT © Doable Team

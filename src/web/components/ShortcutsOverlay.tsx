@@ -3,12 +3,20 @@ import { Kbd } from "@/components/ui/kbd";
 
 const GROUPS: { title: string; keys: [string, string][] }[] = [
   {
+    title: "Moving around",
+    keys: [["↑ / ↓", "Move through mail"], ["←", "Jump to the sidebar"], ["→", "Open the Assistant"], ["↵", "Open (sidebar: go there)"], ["esc", "Back to the list"]],
+  },
+  {
     title: "Go to",
-    keys: [["1", "Imbox"], ["2", "The Feed"], ["3", "Paper Trail"], ["4", "Screener"], ["5", "Focus & Reply"], ["6", "Set Aside"], ["7", "Bubble Up"], ["8", "Previously Seen"], ["9", "Contacts"], ["⌘K", "Search & commands"], ["⌘B", "Toggle sidebar"]],
+    keys: [["⌘K", "Search & commands"], ["⌘B", "Toggle sidebar"], ["⌘J", "Assistant (open / close)"]],
   },
   {
     title: "Lists",
     keys: [["j / k", "Move down / up"], ["↵ or o", "Open thread"], ["x", "Select thread"], ["l", "Reply later"], ["a", "Set aside"], ["z", "Bubble up"], ["u", "Mark unread"], ["#", "Trash"], ["b", "Labels (with selection)"], ["g", "Merge selected"]],
+  },
+  {
+    title: "Power through new",
+    keys: [["o", "Start (from the Imbox)"], ["j / k", "Next / previous"], ["r", "Reply inline"], ["l", "Reply later"], ["a", "Set aside"], ["e", "Mark seen"], ["#", "Trash"], ["↵", "Open the full thread"], ["esc", "Back to the Imbox"]],
   },
   {
     title: "Everywhere",
@@ -24,7 +32,7 @@ export function ShortcutsOverlay({ open, onClose }: { open: boolean; onClose: ()
           <DialogTitle>Keyboard shortcuts</DialogTitle>
           <DialogDescription>The whole app works without a mouse.</DialogDescription>
         </DialogHeader>
-        <div className="grid sm:grid-cols-3 gap-6 pt-1">
+        <div className="grid sm:grid-cols-2 gap-x-8 gap-y-6 pt-1">
           {GROUPS.map((g) => (
             <div key={g.title}>
               <div className="text-xs font-medium text-muted-foreground mb-2">{g.title}</div>

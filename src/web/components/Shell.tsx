@@ -10,11 +10,14 @@ import { ALL, useAccount } from "../context/AccountContext";
 import { useCompose } from "../context/ComposeContext";
 import { api, useCounts, useMeMutations } from "../api";
 import { useKeys } from "../lib/keys";
+import { focus, overlayOpen, useFocusRegion } from "../lib/focusStore";
 import { Avatar } from "./Avatar";
 import { CommandPalette } from "./CommandPalette";
 import { AssistantPanel } from "./AssistantPanel";
 import { assistant, useAssistant } from "../lib/assistantStore";
 import { ShortcutsOverlay } from "./ShortcutsOverlay";
+import { UpdateDialog } from "./UpdateDialog";
+import { useUpdateCheck } from "../lib/update";
 import {
   Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarRail, SidebarTrigger, useSidebar,
 } from "@/components/ui/sidebar";
@@ -32,7 +35,7 @@ interface NavItem {
 }
 
 const TITLES: [string, string][] = [
-  ["/feed", "The Feed"], ["/paper-trail", "Paper Trail"], ["/screener", "Screener"], ["/screened-out", "Screened out"], ["/reply-later", "Reply Later"],
+  ["/feed", "The Feed"], ["/paper-trail", "Paper Trail"], ["/power-through", "Power through new"], ["/screener", "Screener"], ["/screened-out", "Screened out"], ["/reply-later", "Reply Later"],
   ["/set-aside", "Set Aside"], ["/bubble-up", "Bubble Up"], ["/previously-seen", "Previously Seen"], ["/contacts", "Contacts"], ["/clips", "Clips"],
   ["/collections", "Collections"], ["/files", "Files"], ["/labels", "Labels"], ["/sent", "Sent"], ["/drafts", "Drafts"], ["/scheduled", "Scheduled"],
   ["/everything", "Everything"], ["/trash", "Trash"], ["/settings", "Settings"], ["/search", "Search"], ["/compose", "New message"], ["/t/", "Thread"], ["/bundle/", "Bundle"], ["/assistant", "Assistant"],
@@ -93,13 +96,17 @@ export function Shell() {
 }
 
 /* ---------------- overlays (palette, shortcuts) share state via a tiny store ---------------- */
-type OverlayState = { palette: boolean; help: boolean };
-let overlayState: OverlayState = { palette: false, help: false };
+type OverlayState = { palette: boolean; help: boolean; update: boolean };
+let overlayState: OverlayState = { palette: false, help: false, update: false };
 const listeners = new Set<() => void>();
 function setOverlay(patch: Partial<OverlayState>) {
   overlayState = { ...overlayState, ...patch };
   listeners.forEach((l) => l());
 }
+export function openUpdateDialog() {
+  setOverlay({ update: true });
+}
+
 function useOverlay() {
   const [, force] = useState(0);
   useEffect(() => {
@@ -121,22 +128,14 @@ function useTheme() {
 }
 
 function Overlays() {
-  const { palette, help } = useOverlay();
+  const { palette, help, update } = useOverlay();
   const { openCompose } = useCompose();
   const { account, accounts } = useAccount();
   const { theme, toggleTheme } = useTheme();
+  const updateInfo = useUpdateCheck();
   const nav = useNavigate();
 
   useKeys({
-    "1": () => nav("/"),
-    "2": () => nav("/feed"),
-    "3": () => nav("/paper-trail"),
-    "4": () => nav("/screener"),
-    "5": () => nav("/reply-later"),
-    "6": () => nav("/set-aside"),
-    "7": () => nav("/bubble-up"),
-    "8": () => nav("/previously-seen"),
-    "9": () => nav("/contacts"),
     c: () => openCompose(),
     "/": () => setOverlay({ palette: true }),
     s: () => setOverlay({ palette: true }),
@@ -167,6 +166,7 @@ function Overlays() {
         case "compose": return openCompose();
         case "palette": return setOverlay({ palette: true });
         case "assistant": return assistant.toggle();
+        case "check-updates": return setOverlay({ update: true });
         case "toggle-sidebar": return window.dispatchEvent(new KeyboardEvent("keydown", { key: "b", metaKey: true, bubbles: true }));
         case "back": return history.back();
         case "forward": return history.forward();
@@ -183,6 +183,7 @@ function Overlays() {
     <>
       <CommandPalette open={palette} onClose={() => setOverlay({ palette: false })} onCompose={() => openCompose()} onToggleTheme={toggleTheme} onShortcuts={() => setOverlay({ help: true })} onAssistant={() => assistant.open()} theme={theme} hasAccount={!!account || accounts.length > 0} />
       <ShortcutsOverlay open={help} onClose={() => setOverlay({ help: false })} />
+      <UpdateDialog open={update} onClose={() => setOverlay({ update: false })} info={updateInfo} />
     </>
   );
 }
@@ -217,6 +218,7 @@ function TopBar() {
 function AppSidebar() {
   const { user, accounts, account, scope, setScope, glyphFor } = useAccount();
   const counts = useCounts(accounts.length > 0);
+  const update = useUpdateCheck();
   const { openCompose } = useCompose();
   const { theme, setTheme } = useTheme();
   const nav = useNavigate();
@@ -256,20 +258,19 @@ function AppSidebar() {
   };
 
   const primary: NavItem[] = [
-    { to: "/", label: "Imbox", icon: <Inbox />, count: c?.imbox_new, end: true, kbd: "1" },
-    { to: "/feed", label: "The Feed", icon: <Rss />, count: c?.feed_new, kbd: "2" },
-    { to: "/paper-trail", label: "Paper Trail", icon: <FileText />, count: c?.paper_trail_new, kbd: "3" },
-    { to: "/screener", label: "Screener", icon: <Shield />, count: c?.screener, kbd: "4" },
+    { to: "/", label: "Imbox", icon: <Inbox />, count: c?.imbox_new, end: true },
+    { to: "/feed", label: "The Feed", icon: <Rss />, count: c?.feed_new },
+    { to: "/paper-trail", label: "Paper Trail", icon: <FileText />, count: c?.paper_trail_new },
+    { to: "/screener", label: "Screener", icon: <Shield />, count: c?.screener },
   ];
   const trays: NavItem[] = [
-    { to: "/reply-later", label: "Reply Later", icon: <Clock />, count: c?.reply_later, kbd: "5" },
-    { to: "/set-aside", label: "Set Aside", icon: <Bookmark />, count: c?.set_aside, kbd: "6" },
-    { to: "/bubble-up", label: "Bubble Up", icon: <ArrowUpCircle />, kbd: "7" },
+    { to: "/reply-later", label: "Reply Later", icon: <Clock />, count: c?.reply_later },
+    { to: "/set-aside", label: "Set Aside", icon: <Bookmark />, count: c?.set_aside },
+    { to: "/bubble-up", label: "Bubble Up", icon: <ArrowUpCircle /> },
   ];
   const library: NavItem[] = [
-    { to: "/assistant", label: "Assistant", icon: <Sparkles />, kbd: "⌘J" },
-    { to: "/previously-seen", label: "Previously Seen", icon: <Eye />, kbd: "8" },
-    { to: "/contacts", label: "Contacts", icon: <Users />, kbd: "9" },
+    { to: "/previously-seen", label: "Previously Seen", icon: <Eye /> },
+    { to: "/contacts", label: "Contacts", icon: <Users /> },
     { to: "/clips", label: "Clips", icon: <Scissors /> },
     { to: "/collections", label: "Collections", icon: <FolderOpen /> },
     { to: "/files", label: "Files", icon: <Files /> },
@@ -284,13 +285,102 @@ function AppSidebar() {
     { to: "/trash", label: "Trash", icon: <Trash2 /> },
   ];
   const isActive = (n: NavItem) => (n.end ? loc.pathname === n.to : loc.pathname.startsWith(n.to));
+  const moreExpanded = moreOpen || more.some(isActive);
 
-  const Item = ({ n }: { n: NavItem }) => (
+  /* ---- arrow-key focus: sidebar │ content │ assistant ---- */
+  const region = useFocusRegion();
+  const assistantState = useAssistant();
+  const [focusIdx, setFocusIdx] = useState(0);
+  const flatNav = useMemo(
+    () => [...primary, ...trays, ...library, ...(moreExpanded ? more : [])],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [c, moreExpanded, loc.pathname],
+  );
+  const activate = useCallback(
+    (n: NavItem) => {
+      if (n.to === "/assistant") assistant.open();
+      else nav(n.to);
+      focus.toContent();
+    },
+    [nav],
+  );
+  // Entering the sidebar starts on the item for the page you're looking at.
+  useEffect(() => {
+    if (region !== "sidebar") return;
+    const i = flatNav.findIndex(isActive);
+    setFocusIdx(i >= 0 ? i : 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [region]);
+  useEffect(() => {
+    if (region !== "sidebar") return;
+    document.querySelector('[data-nav-focused="true"]')?.scrollIntoView({ block: "nearest" });
+  }, [region, focusIdx]);
+
+  const arrowsOk = () => !isMobile && !overlayOpen();
+  useKeys({
+    ArrowLeft: () => {
+      if (!arrowsOk()) return;
+      // Mirror of ArrowRight: leaving the assistant closes it, then content steps into the sidebar.
+      if (assistantState.open && region !== "sidebar") {
+        assistant.close();
+        focus.toContent();
+        return;
+      }
+      if (region === "content") focus.toSidebar();
+    },
+    ArrowRight: () => {
+      if (!arrowsOk()) return;
+      if (region === "sidebar") {
+        const n = flatNav[focusIdx];
+        if (n) activate(n);
+      } else {
+        assistant.open();
+        // The panel mounts a tick later; keep trying briefly, then give up quietly.
+        let tries = 0;
+        const focusInput = () => {
+          const el = document.querySelector<HTMLTextAreaElement>("[data-assistant-input]");
+          if (el && !el.disabled) return el.focus();
+          if (tries++ < 12) window.setTimeout(focusInput, 50);
+        };
+        window.setTimeout(focusInput, 30);
+      }
+    },
+    ArrowDown: () => {
+      if (!arrowsOk() || region !== "sidebar" || !flatNav.length) return;
+      setFocusIdx((i) => (i + 1) % flatNav.length);
+    },
+    ArrowUp: () => {
+      if (!arrowsOk() || region !== "sidebar" || !flatNav.length) return;
+      setFocusIdx((i) => (i - 1 + flatNav.length) % flatNav.length);
+    },
+    Enter: () => {
+      if (!arrowsOk() || region !== "sidebar") return;
+      const n = flatNav[focusIdx];
+      if (n) activate(n);
+    },
+    Escape: () => {
+      if (region === "sidebar") focus.toContent();
+    },
+  });
+
+  const Item = ({ n }: { n: NavItem }) => {
+    const focused = region === "sidebar" && flatNav[focusIdx]?.to === n.to;
+    return (
     <SidebarMenuItem>
-      <SidebarMenuButton asChild isActive={isActive(n)} tooltip={n.kbd ? `${n.label}  ${n.kbd}` : n.label} className="h-7 text-sm [&>svg]:text-muted-foreground data-[active=true]:font-medium data-[active=true]:[&>svg]:text-foreground">
+      <SidebarMenuButton
+        asChild
+        isActive={isActive(n)}
+        data-nav-focused={focused || undefined}
+        tooltip={n.kbd ? `${n.label}  ${n.kbd}` : n.label}
+        className={cn(
+          "h-7 text-sm [&>svg]:text-muted-foreground data-[active=true]:font-medium data-[active=true]:[&>svg]:text-foreground",
+          focused && "bg-sidebar-accent text-sidebar-accent-foreground ring-1 ring-ring",
+        )}
+      >
         <Link
           to={n.to}
           onClick={(e) => {
+            focus.toContent();
             if (n.to === "/assistant") {
               e.preventDefault();
               assistant.open();
@@ -303,7 +393,8 @@ function AppSidebar() {
         </Link>
       </SidebarMenuButton>
     </SidebarMenuItem>
-  );
+    );
+  };
 
   const scopeTitle = scope === ALL ? (accounts.length > 1 ? "All accounts" : accounts[0]?.email ?? "No Gmail yet") : account?.email ?? "All accounts";
 
@@ -384,12 +475,12 @@ function AppSidebar() {
             <SidebarMenu>{library.map((n) => <Item key={n.to} n={n} />)}</SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
-        <Collapsible open={moreOpen || more.some(isActive)} onOpenChange={(o) => { setMoreOpen(o); try { localStorage.setItem("hey.more", o ? "open" : "closed"); } catch {} }}>
+        <Collapsible open={moreExpanded} onOpenChange={(o) => { setMoreOpen(o); try { localStorage.setItem("hey.more", o ? "open" : "closed"); } catch {} }}>
           <SidebarGroup className="py-1">
             <CollapsibleTrigger asChild>
               <SidebarGroupLabel className="text-xs font-medium text-muted-foreground h-7 cursor-pointer hover:bg-sidebar-accent group-data-[collapsible=icon]:hidden">
                 More
-                <ChevronRight size={12} className="ml-auto transition-transform data-[open=true]:rotate-90" data-open={moreOpen || more.some(isActive)} />
+                <ChevronRight size={12} className="ml-auto transition-transform data-[open=true]:rotate-90" data-open={moreExpanded} />
               </SidebarGroupLabel>
             </CollapsibleTrigger>
             <CollapsibleContent>
@@ -403,6 +494,15 @@ function AppSidebar() {
 
       <SidebarFooter className="p-2">
         <SidebarMenu>
+          {update.updateAvailable && (
+            <SidebarMenuItem>
+              <SidebarMenuButton onClick={openUpdateDialog} tooltip={`Update available · v${update.latest}`} className="h-7 text-sm [&>svg]:text-muted-foreground">
+                <ArrowUpCircle />
+                <span className="flex-1 truncate">Update available</span>
+                <span className="size-1.5 rounded-full bg-foreground shrink-0" aria-hidden />
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          )}
           <SidebarMenuItem>
             <SidebarMenuButton asChild isActive={loc.pathname.startsWith("/settings")} tooltip="Settings" className="h-7 text-sm [&>svg]:text-muted-foreground">
               <Link to="/settings">
