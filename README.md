@@ -3,7 +3,8 @@
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/doable-team/heyflare) [![npm](https://img.shields.io/npm/v/create-heyflare?label=npm%20create%20heyflare)](https://www.npmjs.com/package/create-heyflare) [![License: MIT](https://img.shields.io/badge/license-MIT-black)](LICENSE)
 
 A self-hosted, HEY-style email client that runs entirely on Cloudflare — **with a built-in AI agent** that reads, triages and
-drafts for you. Connect Gmail accounts and mailboxes on your own domains, screen first-time senders, and read a calm, unified Imbox. Single owner, minimal black-and-white UI, tailor-made
+drafts for you. Connect Gmail accounts and mailboxes on your own domains, screen first-time senders, read a calm, unified Imbox, and keep a
+HEY-style calendar next to it. Single owner, minimal black-and-white UI, tailor-made
 mobile app UI, no external services beyond Google's APIs and Cloudflare.
 
 ## Built-in AI agent
@@ -39,6 +40,11 @@ lives in a resizable side panel and can see the thread you're reading.
 - **Power through new** — the whole "New for you" queue stacked on one page: reply, defer or file each one, `o` to start.
 - **Reply Later, Set Aside, Bubble Up** — trays docked in the Imbox, Focus & Reply mode, snooze with presets.
 - **Bundles** — collapse a chatty sender into one row per batch; read the batch like a feed.
+- **Calendar** — weeks that scroll continuously, HEY-style, each day a list of chips rather than an hour grid, with a
+  fitted single-day timeline beside it; plus month, year and agenda views.
+  Google Calendar over OAuth (two-way), subscribed `.ics`/`webcal` feeds (read-only), `.ics` import, and heyflare's own
+  calendars. Habits, a journal, day labels and cover art, "sometime this week" tasks, countdowns, time tracking, and the
+  next three days shown at the top of the Imbox. `0` flips between mail and calendar.
 - **Unified inbox** across every connected account, with per-account glyphs and a From picker in compose.
 - **Gmail** via OAuth (incremental history sync every minute plus sync-on-focus; sending through Gmail).
 - **Custom domain mailboxes** — inbound through Cloudflare Email Routing, outbound through Cloudflare Email Sending or Resend.
@@ -90,10 +96,11 @@ Prerequisites: a Cloudflare account, Node 20+, and a Google Cloud project.
 
 ### 1. Google OAuth client
 1. https://console.cloud.google.com → create a project.
-2. **APIs & Services → Library**: enable **Gmail API** and **People API**.
+2. **APIs & Services → Library**: enable **Gmail API**, **People API** and, for the calendar, **Google Calendar API**.
 3. **OAuth consent screen**: External; add your Gmail addresses as test users (publish the app later to lift the 7-day
    refresh-token limit for test users). Scopes: `gmail.modify`, `contacts.other.readonly`, `contacts.readonly`,
-   `directory.readonly`, `openid`, `email`, `profile`.
+   `directory.readonly`, `openid`, `email`, `profile`. Add `https://www.googleapis.com/auth/calendar` if you want the
+   calendar — heyflare asks for it separately, from Settings → Calendar, so connecting mail alone never touches it.
 4. **Credentials → OAuth client ID → Web application**:
    - Authorized JavaScript origins: `https://YOUR_HOST`
    - Authorized redirect URIs: `https://YOUR_HOST/auth/google/callback` and `http://localhost:8787/auth/google/callback`
@@ -132,12 +139,24 @@ Downloaded builds aren't notarized yet, so macOS may say the app is "damaged". C
 xattr -dr com.apple.quarantine /Applications/heyflare.app
 ```
 
+## iPhone app
+
+A native iOS app (Tauri 2, WKWebView) lives in [`apps/ios`](apps/ios). It wraps the same server with the hand-built
+mobile UI, system notifications and links that open in Safari. It builds with a **free Apple ID** — no paid developer
+account — and [`apps/ios/README.md`](apps/ios/README.md) covers signing it, the 7-day expiry, and refreshing over Wi-Fi
+with SideStore or AltStore. You need full Xcode to build it.
+
+```sh
+cd apps/ios && npm install && npm run ios:init && npm run dev
+```
+
 ## Updating
 
 heyflare tells you when a new version is out: an **Update available** row appears at the bottom of the sidebar, and the
 dialog explains what changed and how to get it.
 
 - **Mac app** — press **Update and restart**. It downloads, installs and relaunches itself.
+- **iPhone app** — rebuild from source, or let SideStore or AltStore refresh it.
 - **Created with npm** — `npx create-heyflare deploy`
 - **Cloned repo** — `git pull && npm run deploy`
 - **Fork + Workers Builds** — merge upstream and push; Cloudflare deploys it.
@@ -159,9 +178,20 @@ Settings → Domains. The domain must be a zone on your Cloudflare account (full
 - **Inbound**: with a `CF_API_TOKEN` secret (Zone Read, Email Routing Rules Edit, Email Routing Settings Edit) heyflare
   enables Email Routing and points the catch-all rule at the Worker automatically; without it the UI shows the manual steps.
   Enabling routing takes over **all** mail for that domain — the app shows the current MX and asks first.
-- **Outbound**: Cloudflare **Email Sending** (Workers Paid, onboard the domain in the dashboard, then uncomment the
-  `send_email` binding in your config) or **Resend** (`RESEND_API_KEY` secret). Until one is configured, mailboxes receive
-  but can't send.
+- **Outbound**: Cloudflare **Email Sending** or **Resend**. Until one is configured, mailboxes receive but can't send,
+  and the composer says so rather than failing silently.
+  - **Cloudflare Email Sending** — needs all three, and the send fails until every one is done:
+    1. Onboard the domain under Email → Email Sending in the dashboard, and verify it.
+    2. Uncomment `"send_email": [{ "name": "EMAIL" }]` in your `wrangler.jsonc` (or `wrangler.local.jsonc`).
+    3. Redeploy, so the binding actually reaches the Worker.
+
+    A send that gets past the binding but is refused reports Cloudflare's own reason — `E_SENDER_DOMAIN_NOT_AVAILABLE`
+    means step 1 is unfinished, `E_RECIPIENT_NOT_ALLOWED` means the domain is still sandboxed to verified recipients.
+  - **Resend** — `wrangler secret put RESEND_API_KEY`, and verify the domain in Resend. No binding, no redeploy needed
+    beyond the secret.
+
+  Cloudflare stamps its own `Message-ID` and rejects any we set, so on that path the sent copy adopts the id Cloudflare
+  returns. Threading headers (`In-Reply-To`, `References`) are sent as normal.
 
 ## Local development
 ```sh
@@ -178,6 +208,7 @@ TOTP (Google Authenticator, 1Password, Authy…) with 10 single-use recovery cod
 ## Docs
 - `API.md` — the worker/web API contract.
 - `DESIGN.md` — the design system (Notion-minimal, shadcn, mobile spec).
+- [`docs/CALENDAR.md`](docs/CALENDAR.md) — how the calendar is put together: sources, views, schema, API, sync.
 - [`docs/UPDATING.md`](docs/UPDATING.md) — what an update changes, how to update, how to roll back.
 
 ## License

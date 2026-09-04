@@ -1,16 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, Navigate, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { ArrowUpCircle, Bookmark, CalendarClock, Check, ChevronDown, ChevronRight, Clock, Eye, FileText, Files, FolderOpen, Inbox, Keyboard, Layers, LogOut, Mail, Monitor, Moon, PenSquare, Plus, Rss, Scissors, Search, Send, Settings, Shield, ShieldOff, Sun, Tag, Trash2, Users, Sparkles } from "lucide-react";
+import { ArrowUpCircle, BookOpen, Bookmark, CalendarClock, CalendarDays, Repeat, Check, ChevronDown, ChevronRight, Clock, Eye, FileText, Files, FolderOpen, Inbox, Keyboard, Layers, LogOut, Mail, Monitor, Moon, PenSquare, Plus, Rss, Scissors, Search, Send, Settings, Shield, ShieldOff, Sun, Tag, Trash2, Users, Sparkles } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
 import { Mark } from "./Logo";
-import { isNative, native, onMenu, installExternalLinkHandler } from "../lib/native";
+import { isNative, isMac, native, onMenu, installExternalLinkHandler } from "../lib/native";
 import { startGoogleConnect } from "../lib/connect";
 import { ALL, useAccount } from "../context/AccountContext";
 import { useCompose } from "../context/ComposeContext";
 import { api, useCounts, useMeMutations } from "../api";
 import { useKeys } from "../lib/keys";
-import { focus, overlayOpen, useFocusRegion } from "../lib/focusStore";
+import { arrows, focus, overlayOpen, useFocusRegion } from "../lib/focusStore";
 import { Avatar } from "./Avatar";
 import { CommandPalette } from "./CommandPalette";
 import { AssistantPanel } from "./AssistantPanel";
@@ -38,7 +38,7 @@ const TITLES: [string, string][] = [
   ["/feed", "The Feed"], ["/paper-trail", "Paper Trail"], ["/power-through", "Power through new"], ["/screener", "Screener"], ["/screened-out", "Screened out"], ["/reply-later", "Reply Later"],
   ["/set-aside", "Set Aside"], ["/bubble-up", "Bubble Up"], ["/previously-seen", "Previously Seen"], ["/contacts", "Contacts"], ["/clips", "Clips"],
   ["/collections", "Collections"], ["/files", "Files"], ["/labels", "Labels"], ["/sent", "Sent"], ["/drafts", "Drafts"], ["/scheduled", "Scheduled"],
-  ["/everything", "Everything"], ["/trash", "Trash"], ["/settings", "Settings"], ["/search", "Search"], ["/compose", "New message"], ["/t/", "Thread"], ["/bundle/", "Bundle"], ["/assistant", "Assistant"],
+  ["/everything", "Everything"], ["/trash", "Trash"], ["/settings", "Settings"], ["/search", "Search"], ["/compose", "New message"], ["/t/", "Thread"], ["/bundle/", "Bundle"], ["/assistant", "Assistant"], ["/calendar", "Calendar"], ["/journal", "Journal"], ["/habits", "Habits"],
 ];
 function pageTitle(path: string): string {
   if (path === "/") return "Imbox";
@@ -58,6 +58,7 @@ export function Shell() {
   const { user, loading, error } = useAccount();
   const loc = useLocation();
   const [open, setOpen] = useState<boolean>(readOpen);
+  const fullHeight = loc.pathname.startsWith("/calendar");
   const aState = useAssistant();
   const docked = aState.open && aState.mode === "dock";
   if (loading) {
@@ -83,9 +84,12 @@ export function Shell() {
         }}
       >
         <AppSidebar />
-        <SidebarInset className="min-w-0 transition-[padding] duration-150" style={{ paddingRight: docked ? aState.width : undefined }}>
+        <SidebarInset className={cn("min-w-0 transition-[padding] duration-150", fullHeight && "h-svh overflow-hidden")} style={{ paddingRight: docked ? aState.width : undefined }}>
           <TopBar />
-          <main className="flex-1 w-full px-4 sm:px-8 pt-4 pb-24">
+          {/* The calendar is a full-height app view that scrolls inside itself, so it gets the
+              viewport exactly and no tall bottom padding — otherwise the page scrolls too and the
+              toolbar drifts away under you. Every other page wants the room to grow. */}
+          <main className={cn("w-full px-4 sm:px-8 pt-4", fullHeight ? "min-h-0 flex-1 overflow-hidden pb-3" : "flex-1 pb-24")}>
             <Outlet />
           </main>
         </SidebarInset>
@@ -141,6 +145,7 @@ function Overlays() {
     s: () => setOverlay({ palette: true }),
     "?": () => setOverlay({ help: true }),
     i: () => nav("/"),
+    "0": () => nav(location.pathname.startsWith("/calendar") ? "/" : "/calendar"),
   });
   useEffect(() => {
     const fn = (e: KeyboardEvent) => {
@@ -157,10 +162,10 @@ function Overlays() {
     return () => window.removeEventListener("keydown", fn);
   }, []);
 
-  // Native macOS shell: menu bar actions, external links, notification deep links.
+  // Native shell: menu-bar actions (Mac only), external links, notification deep links.
   useEffect(() => {
     if (!isNative) return;
-    const offMenu = onMenu((id) => {
+    const offMenu = !isMac ? () => {} : onMenu((id) => {
       if (id.startsWith("nav:")) return nav(id.slice(4));
       switch (id) {
         case "compose": return openCompose();
@@ -195,7 +200,7 @@ function TopBar() {
   const title = pageTitle(loc.pathname);
   const scopeLabel = accounts.length > 1 ? (scope === ALL ? "All accounts" : account?.email) : undefined;
   return (
-    <header data-tauri-drag-region={isNative || undefined} className="sticky top-0 z-30 h-11 flex items-center gap-2 px-2 sm:px-3 bg-background/90 backdrop-blur">
+    <header data-tauri-drag-region={isMac || undefined} className="sticky top-0 z-30 h-11 flex items-center gap-2 px-2 sm:px-3 bg-background/90 backdrop-blur">
       <SidebarTrigger className="text-muted-foreground" />
       <div className="flex items-center gap-1.5 min-w-0 text-sm">
         <span className="font-medium truncate">{title}</span>
@@ -262,6 +267,7 @@ function AppSidebar() {
     { to: "/feed", label: "The Feed", icon: <Rss />, count: c?.feed_new },
     { to: "/paper-trail", label: "Paper Trail", icon: <FileText />, count: c?.paper_trail_new },
     { to: "/screener", label: "Screener", icon: <Shield />, count: c?.screener },
+    { to: "/calendar", label: "Calendar", icon: <CalendarDays />, kbd: "0" },
   ];
   const trays: NavItem[] = [
     { to: "/reply-later", label: "Reply Later", icon: <Clock />, count: c?.reply_later },
@@ -278,6 +284,8 @@ function AppSidebar() {
     { to: "/drafts", label: "Drafts", icon: <PenSquare /> },
   ];
   const more: NavItem[] = [
+    { to: "/journal", label: "Journal", icon: <BookOpen /> },
+    { to: "/habits", label: "Habits", icon: <Repeat /> },
     { to: "/sent", label: "Sent", icon: <Send /> },
     { to: "/scheduled", label: "Scheduled", icon: <CalendarClock /> },
     { to: "/everything", label: "Everything", icon: <Mail /> },
@@ -316,7 +324,7 @@ function AppSidebar() {
     document.querySelector('[data-nav-focused="true"]')?.scrollIntoView({ block: "nearest" });
   }, [region, focusIdx]);
 
-  const arrowsOk = () => !isMobile && !overlayOpen();
+  const arrowsOk = () => !isMobile && !overlayOpen() && (region === "sidebar" || !arrows.claimed());
   useKeys({
     ArrowLeft: () => {
       if (!arrowsOk()) return;
@@ -400,7 +408,7 @@ function AppSidebar() {
 
   return (
     <Sidebar collapsible="icon" className="border-r-0">
-      <SidebarHeader data-tauri-drag-region={isNative || undefined} className={cn("gap-1 p-2", isNative && "pt-10")}>
+      <SidebarHeader data-tauri-drag-region={isMac || undefined} className={cn("gap-1 p-2", isMac && "pt-10")}>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <SidebarMenuButton size="lg" className="h-9 data-[state=open]:bg-sidebar-accent group-data-[collapsible=icon]:!p-1">

@@ -12,6 +12,11 @@ import m0007 from "../../migrations/0007_bundles.sql";
 import m0008 from "../../migrations/0008_two_factor.sql";
 import m0009 from "../../migrations/0009_bundle_batches.sql";
 import m0010 from "../../migrations/0010_ai.sql";
+import m0011 from "../../migrations/0011_calendar.sql";
+import m0012 from "../../migrations/0012_calendar_default_view.sql";
+import m0013 from "../../migrations/0013_day_covers.sql";
+import m0014 from "../../migrations/0014_calendar_views.sql";
+import m0015 from "../../migrations/0015_calendar_error.sql";
 
 export const MIGRATIONS: { name: string; sql: string }[] = [
   { name: "0001_init.sql", sql: m0001 },
@@ -24,6 +29,11 @@ export const MIGRATIONS: { name: string; sql: string }[] = [
   { name: "0008_two_factor.sql", sql: m0008 },
   { name: "0009_bundle_batches.sql", sql: m0009 },
   { name: "0010_ai.sql", sql: m0010 },
+  { name: "0011_calendar.sql", sql: m0011 },
+  { name: "0012_calendar_default_view.sql", sql: m0012 },
+  { name: "0013_day_covers.sql", sql: m0013 },
+  { name: "0014_calendar_views.sql", sql: m0014 },
+  { name: "0015_calendar_error.sql", sql: m0015 },
 ];
 
 /** Split a migration file into statements: full-line comments dropped, split on `;` at end of line. */
