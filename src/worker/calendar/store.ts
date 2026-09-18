@@ -13,7 +13,6 @@ import { uid, now, inClause, chunk, safeJson, logSync } from "../db";
 import type {
   CalendarRow,
   EventRow,
-  HabitRow,
   CalendarDayRow,
   FlexTaskRow,
   TimeEntryRow,
@@ -28,7 +27,6 @@ import type {
   CalendarView,
   EventAttendee,
   FlexTask,
-  Habit,
   Reminder,
   Rsvp,
   TimeEntry,
@@ -43,7 +41,6 @@ import {
   minutesOfDay,
   startOfDay,
   weekStartOf,
-  weekdayOf,
   zonedTime,
 } from "./dates";
 import type { IcsEventInput } from "./ical";
@@ -52,8 +49,6 @@ import { createRemoteEvent, deleteRemoteEvent, setRemoteRsvp, updateRemoteEvent 
 
 /** Hard ceiling on expanded occurrences per request, so a decade-wide window can't blow up. */
 const MAX_OCCURRENCES = 5000;
-/** How far back a habit streak is willing to walk. */
-const STREAK_LOOKBACK = 400;
 
 const KINDS = ["event", "birthday", "anniversary", "todo"] as const;
 const STATUSES = ["confirmed", "tentative", "cancelled"] as const;
@@ -137,20 +132,6 @@ export function toEvent(
   };
 }
 
-export function toHabit(r: HabitRow, completions: string[], streak: number): Habit {
-  return {
-    id: r.id,
-    name: r.name,
-    icon: r.icon,
-    color: r.color,
-    days: parseDays(r.days),
-    position: r.position,
-    archived: !!r.archived,
-    completions,
-    streak,
-  };
-}
-
 export function toFlexTask(r: FlexTaskRow): FlexTask {
   return { id: r.id, week_start: r.week_start, title: r.title, done: !!r.done_at, position: r.position };
 }
@@ -179,14 +160,10 @@ export function toSettings(r: CalendarSettingsRow): CalendarSettings {
     night_end: r.night_end,
     collapse_night: !!r.collapse_night,
     time_format: r.time_format === "24" ? "24" : "12",
-    default_view: (["days", "week", "year"].includes(r.default_view) ? r.default_view : "week") as CalendarView,
+    default_view: (["days", "week", "month", "year"].includes(r.default_view) ? r.default_view : "week") as CalendarView,
     show_declined: !!r.show_declined,
     cover_art: !!r.cover_art,
   };
-}
-
-function parseDays(s: string): number[] {
-  return [...new Set((s ?? "").split(",").map((x) => Number(x.trim())).filter((n) => Number.isInteger(n) && n >= 0 && n <= 6))].sort();
 }
 
 // ---------- Ids ----------
@@ -254,7 +231,7 @@ export async function putSettings(db: D1Database, userId: string, patch: Setting
     collapse_night: patch.collapse_night !== undefined ? (patch.collapse_night ? 1 : 0) : cur.collapse_night,
     time_format: patch.time_format !== undefined ? (String(patch.time_format) === "24" ? "24" : "12") : cur.time_format,
     default_view:
-      patch.default_view !== undefined && ["days", "week", "year"].includes(String(patch.default_view))
+      patch.default_view !== undefined && ["days", "week", "month", "year"].includes(String(patch.default_view))
         ? String(patch.default_view)
         : cur.default_view,
     show_declined: patch.show_declined !== undefined ? (patch.show_declined ? 1 : 0) : cur.show_declined,
@@ -348,8 +325,11 @@ export async function rangeFor(env: Env, userId: string, from: string, to: strin
     for (const part of chunk(masterIds, 90)) {
       const oc = inClause(part);
       const ov = await db
-        .prepare(`SELECT master_id, occurrence_date FROM events WHERE user_id = ? AND master_id IN ${oc.sql} AND occurrence_date IS NOT NULL`)
-        .bind(userId, ...oc.params)
+        // No `user_id = ?` here on purpose: the masters are the user's own rows, so the filter adds
+        // nothing — and its presence made SQLite walk every event of the user's on the user_id index
+        // instead of probing the partial master_id index it was written for.
+        .prepare(`SELECT master_id, occurrence_date FROM events WHERE master_id IN ${oc.sql} AND occurrence_date IS NOT NULL`)
+        .bind(...oc.params)
         .all<{ master_id: string; occurrence_date: string }>();
       for (const o of ov.results ?? []) overridden.add(`${o.master_id}|${o.occurrence_date}`);
       const cp = await db
@@ -402,57 +382,13 @@ export async function rangeFor(env: Env, userId: string, from: string, to: strin
     return a.title.localeCompare(b.title);
   });
 
-  const [habits, days, flex_tasks, time_entries] = await Promise.all([
-    loadHabits(db, userId, from, to, tz),
+  const [days, flex_tasks, time_entries] = await Promise.all([
     loadDays(db, userId, from, to),
     loadFlexTasks(db, userId, from, to, settings.week_start),
     loadTimeEntries(db, userId, windowStart, windowEnd),
   ]);
 
-  return { from, to, events, habits, days, flex_tasks, time_entries };
-}
-
-async function loadHabits(db: D1Database, userId: string, from: string, to: string, tz: string): Promise<Habit[]> {
-  const rows = (await db.prepare(`SELECT * FROM habits WHERE user_id = ? AND archived = 0 ORDER BY position, created_at`).bind(userId).all<HabitRow>()).results ?? [];
-  if (!rows.length) return [];
-  const today = dateKey(now(), tz);
-  const since = addDays(today, -STREAK_LOOKBACK);
-  const inWindow = new Map<string, string[]>();
-  const recent = new Map<string, Set<string>>();
-  for (const part of chunk(rows.map((h) => h.id), 90)) {
-    const ic = inClause(part);
-    // One query covers both jobs: the window the client draws, and the streak's walk back from today.
-    const lo = since < from ? since : from;
-    const hi = today > to ? today : to;
-    const cs = await db
-      .prepare(`SELECT habit_id, date FROM habit_completions WHERE habit_id IN ${ic.sql} AND date >= ? AND date <= ? ORDER BY date`)
-      .bind(...ic.params, lo, hi)
-      .all<{ habit_id: string; date: string }>();
-    for (const c of cs.results ?? []) {
-      const set = recent.get(c.habit_id) ?? new Set<string>();
-      set.add(c.date);
-      recent.set(c.habit_id, set);
-      if (c.date >= from && c.date <= to) {
-        const arr = inWindow.get(c.habit_id) ?? [];
-        arr.push(c.date);
-        inWindow.set(c.habit_id, arr);
-      }
-    }
-  }
-  return rows.map((h) => toHabit(h, inWindow.get(h.id) ?? [], streakFor(parseDays(h.days), recent.get(h.id) ?? new Set(), today)));
-}
-
-/** Consecutive scheduled days completed, walking back from today. Today itself gets a pass: the day isn't over. */
-function streakFor(days: number[], done: Set<string>, today: string): number {
-  if (!days.length) return 0;
-  let n = 0;
-  let d = today;
-  for (let i = 0; i < STREAK_LOOKBACK; i++, d = addDays(d, -1)) {
-    if (!days.includes(weekdayOf(d))) continue;
-    if (done.has(d)) n++;
-    else if (d !== today) break;
-  }
-  return n;
+  return { from, to, events, days, flex_tasks, time_entries };
 }
 
 async function loadDays(db: D1Database, userId: string, from: string, to: string): Promise<CalendarDay[]> {

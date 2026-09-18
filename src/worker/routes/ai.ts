@@ -3,9 +3,10 @@ import { Hono } from "hono";
 import type { AppEnv } from "../env";
 import type { AccountRow, ThreadRow } from "../db";
 import { uid, now, accountForThread } from "../db";
-import { encryptSecret } from "../ai/crypto";
+import { encryptSecret, decryptSecret } from "../ai/crypto";
 import { PRESETS, MOCK_PRESET, presetById, loadAiSettings, loadAiConfig, makeProvider, describeApiError, AiNotConfigured } from "../ai/provider";
 import { listMemory, addMemory, updateMemory, deleteMemory, clearMemory, learnFromMail, type MemoryKind } from "../ai/memory";
+import { loadMem0Config, mem0Test, reconcileUser, migrateToMem0Only, importFromMem0, changeMem0ExternalUserId } from "../ai/mem0";
 import { runChatTurn, generateReply, summarizeThread, threadToText, type ChatDeps, type ReplyTone, type SseEvent } from "../ai/chat";
 import { loadThreadDetail } from "./mail";
 
@@ -50,12 +51,22 @@ ai.get("/settings", async (c) => {
     presets: mockOk ? [...PRESETS, MOCK_PRESET] : PRESETS,
     last_learned_at: state?.last_learned_at ?? null,
     server_ready: true,
+    mem0_mode: row?.mem0_mode ?? "own",
+    mem0_base_url: row?.mem0_base_url ?? "",
+    mem0_key_hint: row?.mem0_key_hint ?? "",
+    mem0_user_id: row?.mem0_user_id ?? "",
+    mem0_last_synced_at: row?.mem0_last_synced_at ?? null,
   });
 });
 
 ai.put("/settings", async (c) => {
   const user = c.get("user");
-  const b = await c.req.json<{ preset?: string; base_url?: string; api_key?: string | null; model?: string; learn?: boolean; auto_send?: boolean }>().catch(() => ({}) as any);
+  const b = await c.req
+    .json<{
+      preset?: string; base_url?: string; api_key?: string | null; model?: string; learn?: boolean; auto_send?: boolean;
+      mem0_mode?: "own" | "mem0" | "both"; mem0_base_url?: string; mem0_api_key?: string | null; mem0_user_id?: string;
+    }>()
+    .catch(() => ({}) as any);
   const cur = await loadAiSettings(c.env, user.id);
   const wantedPreset = typeof b.preset === "string" ? b.preset : cur?.preset ?? "anthropic";
   if (wantedPreset === "mock" && c.env.AI_MOCK !== "1") return c.json({ error: "unknown_preset" }, 400);
@@ -85,13 +96,77 @@ ai.put("/settings", async (c) => {
   const model = (typeof b.model === "string" ? b.model.trim().slice(0, 120) : cur?.model) || preset.default_model;
   const learn = typeof b.learn === "boolean" ? (b.learn ? 1 : 0) : cur?.learn ?? 1;
   const autoSend = typeof b.auto_send === "boolean" ? (b.auto_send ? 1 : 0) : cur?.auto_send ?? 0;
+
+  let mem0Enc = cur?.mem0_api_key_enc ?? "";
+  let mem0Hint = cur?.mem0_key_hint ?? "";
+  if (typeof b.mem0_api_key === "string") {
+    const key = b.mem0_api_key.trim();
+    if (key) {
+      try {
+        mem0Enc = await encryptSecret(await getSessionSecret(c.env), key);
+      } catch (e) {
+        return c.json({ error: (e as Error).message }, 500);
+      }
+      mem0Hint = key.length > 12 ? `${key.slice(0, 6)}…${key.slice(-4)}` : "••••";
+    }
+  } else if (b.mem0_api_key === null) {
+    mem0Enc = "";
+    mem0Hint = "";
+  }
+  let mem0BaseUrl = cur?.mem0_base_url ?? "";
+  if (typeof b.mem0_base_url === "string") {
+    mem0BaseUrl = b.mem0_base_url.trim().replace(/\/+$/, "");
+    if (mem0BaseUrl && !/^https?:\/\//i.test(mem0BaseUrl)) return c.json({ error: "mem0_base_url_must_be_http" }, 400);
+  }
+  const prevMode = cur?.mem0_mode ?? "own";
+  const nextMode = b.mem0_mode === "mem0" || b.mem0_mode === "both" || b.mem0_mode === "own" ? b.mem0_mode : prevMode;
+  if (nextMode !== "own" && !mem0BaseUrl) return c.json({ error: "mem0_base_url_required" }, 400);
+  const mem0Enabled = nextMode !== "own" ? 1 : 0;
+  const mem0UserId = typeof b.mem0_user_id === "string" ? b.mem0_user_id.trim().slice(0, 120) : cur?.mem0_user_id ?? "";
+
   await c.env.DB.prepare(
-    `INSERT INTO ai_settings (user_id, provider, preset, base_url, api_key_enc, key_hint, model, learn, auto_send, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(user_id) DO UPDATE SET provider = excluded.provider, preset = excluded.preset, base_url = excluded.base_url, api_key_enc = excluded.api_key_enc, key_hint = excluded.key_hint, model = excluded.model, learn = excluded.learn, auto_send = excluded.auto_send, updated_at = excluded.updated_at`
+    `INSERT INTO ai_settings (user_id, provider, preset, base_url, api_key_enc, key_hint, model, learn, auto_send, mem0_enabled, mem0_mode, mem0_base_url, mem0_api_key_enc, mem0_key_hint, mem0_user_id, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(user_id) DO UPDATE SET provider = excluded.provider, preset = excluded.preset, base_url = excluded.base_url, api_key_enc = excluded.api_key_enc, key_hint = excluded.key_hint,
+       model = excluded.model, learn = excluded.learn, auto_send = excluded.auto_send, mem0_enabled = excluded.mem0_enabled, mem0_mode = excluded.mem0_mode, mem0_base_url = excluded.mem0_base_url,
+       mem0_api_key_enc = excluded.mem0_api_key_enc, mem0_key_hint = excluded.mem0_key_hint, mem0_user_id = excluded.mem0_user_id, updated_at = excluded.updated_at`
   )
-    .bind(user.id, preset.kind, preset.id, baseUrl, enc, hint, model, learn, autoSend, now())
+    .bind(user.id, preset.kind, preset.id, baseUrl, enc, hint, model, learn, autoSend, mem0Enabled, nextMode, mem0BaseUrl, mem0Enc, mem0Hint, mem0UserId, now())
     .run();
-  return c.json({ ok: true, provider: preset.kind, preset: preset.id, key_hint: hint, model, learn: !!learn, auto_send: !!autoSend });
+
+  // The mode, or the external id mem0 is scoped under, changed: move whatever memory already
+  // exists across so switching never looks like data loss. Small sets (capped at 80), so this
+  // stays inline rather than backgrounded. Built straight from what was just written rather than
+  // re-read through loadMem0State, which gates on the *current* mode — already the new one at this
+  // point, so it would see "own" as "not configured" for a mem0 -> own transition and skip the
+  // very import that mode change needs.
+  const prevExternalUserId = cur?.mem0_user_id?.trim() || user.id;
+  const nextExternalUserId = mem0UserId || user.id;
+  let mem0Warning: string | undefined;
+  if (mem0BaseUrl && (nextMode !== "own" || prevMode !== "own")) {
+    try {
+      const apiKey = mem0Enc ? await decryptSecret(await getSessionSecret(c.env), mem0Enc) : "";
+      const cfg = { baseUrl: mem0BaseUrl, apiKey, externalUserId: nextExternalUserId };
+      if (nextMode !== prevMode) {
+        if (nextMode === "mem0") {
+          const r = await migrateToMem0Only(c.env, user.id, cfg);
+          if (r.failed) mem0Warning = `${r.failed} ${r.failed === 1 ? "entry" : "entries"} couldn't be pushed to mem0 and stayed in heyflare — try Sync now once "Both" is selected, or Test connection to check mem0 is reachable.`;
+        } else if (prevMode === "mem0") await importFromMem0(c.env, user.id, cfg);
+        else if (nextMode === "both") await reconcileUser(c.env, user.id);
+      } else if (nextMode !== "own" && nextExternalUserId !== prevExternalUserId) {
+        const r = await changeMem0ExternalUserId(cfg, prevExternalUserId);
+        if (r.failed) mem0Warning = `${r.failed} ${r.failed === 1 ? "entry" : "entries"} couldn't be moved to the new mem0 user id and stayed under the old one.`;
+      }
+    } catch (e) {
+      console.error("mem0 mode transition failed", (e as Error).message);
+      mem0Warning = "Switching modes partly failed — check Test connection and try again.";
+    }
+  }
+
+  return c.json({
+    ok: true, provider: preset.kind, preset: preset.id, key_hint: hint, model, learn: !!learn, auto_send: !!autoSend,
+    mem0_mode: nextMode, mem0_base_url: mem0BaseUrl, mem0_key_hint: mem0Hint, mem0_user_id: mem0UserId, mem0_warning: mem0Warning,
+  });
 });
 
 ai.post("/settings/test", async (c) => {
@@ -102,6 +177,77 @@ ai.post("/settings/test", async (c) => {
     return c.json({ ok: true, model: d.cfg.model, reply: r.text.trim().slice(0, 40) });
   } catch (e) {
     return c.json({ ok: false, error: describeApiError(e) }, 400);
+  }
+});
+
+ai.post("/mem0/test", async (c) => {
+  const user = c.get("user");
+  const cfg = await loadMem0Config(c.env, user.id);
+  if (!cfg) return c.json({ ok: false, error: "Turn on mem0 sync and set a base URL first" }, 400);
+  try {
+    await mem0Test(cfg);
+    return c.json({ ok: true });
+  } catch (e) {
+    return c.json({ ok: false, error: (e as Error).message.slice(0, 300) }, 400);
+  }
+});
+
+ai.post("/mem0/sync", async (c) => {
+  const user = c.get("user");
+  const r = await reconcileUser(c.env, user.id);
+  if (!r) return c.json({ error: "mem0_not_configured" }, 400);
+  return c.json({ ok: true, ...r });
+});
+
+ai.post("/models", async (c) => {
+  const user = c.get("user");
+  const b = await c.req.json<{ preset?: string; base_url?: string; api_key?: string }>().catch(() => ({}) as any);
+  const row = await loadAiSettings(c.env, user.id);
+  const preset = presetById(typeof b.preset === "string" ? b.preset : row?.preset ?? "anthropic");
+  const base = preset.id === "custom" ? String(b.base_url ?? "").trim().replace(/\/+$/, "") : preset.base_url;
+  if (!base || !/^https?:\/\//i.test(base)) return c.json({ models: [] });
+  let key = typeof b.api_key === "string" ? b.api_key.trim() : "";
+  if (!key && row?.api_key_enc) {
+    try {
+      key = await decryptSecret(await getSessionSecret(c.env), row.api_key_enc);
+    } catch {
+      key = "";
+    }
+  }
+  const headers: Record<string, string> = { accept: "application/json" };
+  if (preset.kind === "anthropic") {
+    headers["anthropic-version"] = "2023-06-01";
+    if (key && (key.startsWith("sk-ant-oat") || !key.startsWith("sk-ant-"))) {
+      headers.authorization = `Bearer ${key}`;
+      headers["anthropic-beta"] = "oauth-2025-04-20";
+    } else if (key) {
+      headers["x-api-key"] = key;
+    }
+  } else {
+    if (key) headers.authorization = `Bearer ${key}`;
+    if (preset.id === "openrouter") {
+      headers["HTTP-Referer"] = "https://github.com/doable-team/heyflare";
+      headers["X-Title"] = "heyflare";
+    }
+  }
+  const url = preset.kind === "anthropic" ? `${base}/v1/models?limit=100` : `${base}/models`;
+  try {
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) {
+      const body = await res.text();
+      return c.json({ models: [], error: `HTTP ${res.status} ${body.trim().slice(0, 200)}`.slice(0, 300) });
+    }
+    const json: any = await res.json().catch(() => null);
+    const arr: any[] = Array.isArray(json?.data) ? json.data : Array.isArray(json?.models) ? json.models : [];
+    const seen = new Set<string>();
+    for (const entry of arr) {
+      const id = typeof entry?.id === "string" ? entry.id : typeof entry?.name === "string" ? entry.name : "";
+      if (id && !seen.has(id)) seen.add(id);
+      if (seen.size >= 500) break;
+    }
+    return c.json({ models: [...seen].sort() });
+  } catch (e) {
+    return c.json({ models: [], error: (e as Error)?.message?.slice(0, 200) ?? "request failed" });
   }
 });
 

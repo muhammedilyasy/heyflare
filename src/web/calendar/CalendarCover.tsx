@@ -1,9 +1,8 @@
 import { Link } from "react-router-dom";
-import { Check, ChevronRight, Video } from "lucide-react";
+import { ChevronRight, Video } from "lucide-react";
 import type { CalEvent } from "@shared/types";
-import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { useCalendarRange, useCalendarSettings, useHabitMutations } from "../api";
+import { useCalendarRange, useCalendarSettings } from "../api";
 import { openExternalUrl } from "../lib/native";
 import { addDays, countdownLabel, fmtTime, relativeDay, todayKey, weekdayLabel } from "../lib/caldate";
 
@@ -16,12 +15,10 @@ export function CalendarCover() {
   const on = settings.data?.cover_art ?? false;
   const today = todayKey();
   const range = useCalendarRange(today, addDays(today, 2), on);
-  const { toggle } = useHabitMutations();
   if (!on) return null;
 
   const days = [today, addDays(today, 1), addDays(today, 2)];
   const fmt = settings.data?.time_format ?? "12";
-  const habits = (range.data?.habits ?? []).filter((h) => !h.archived);
   const empty = (range.data?.events ?? []).length === 0;
 
   return (
@@ -33,30 +30,6 @@ export function CalendarCover() {
           Calendar <ChevronRight size={12} />
         </Link>
       </header>
-
-      {habits.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1 border-b border-border px-3 py-1.5">
-          {habits.map((h) => {
-            const done = h.completions?.includes(today);
-            return (
-              <button
-                key={h.id}
-                type="button"
-                onClick={() => toggle.mutate({ id: h.id, date: today })}
-                aria-pressed={done}
-                className={cn(
-                  "inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[11px] transition-colors",
-                  done ? "border-transparent text-background" : "border-border text-muted-foreground hover:border-foreground/30",
-                )}
-                style={done ? { background: h.color || "currentColor" } : undefined}
-              >
-                {h.icon || <Check size={9} />}
-                {h.name}
-              </button>
-            );
-          })}
-        </div>
-      )}
 
       <div className="grid gap-px bg-border sm:grid-cols-3">
         {days.map((d) => {

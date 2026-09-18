@@ -3,13 +3,11 @@ import type { AppEnv } from "../env";
 import type { AccountRow, MessageRow, ThreadRow } from "../db";
 import type { Address } from "@shared/types";
 import { uid, now, safeJson, ownedAccount, accountForThread } from "../db";
-import { htmlToText } from "../sanitize";
 import { googleConfigured, hasCalendarScope, hasMailScope, CALENDAR_SCOPE } from "../google";
 import { appOrigin, HANDOFF_PREFIX, statePrefixFor } from "./auth";
-import type { DayCoverRow, CalendarDayRow, CalendarRow, CalendarSettingsRow, FlexTaskRow, HabitRow, TimeEntryRow } from "../calendar/types";
+import type { DayCoverRow, CalendarDayRow, CalendarRow, CalendarSettingsRow, FlexTaskRow, TimeEntryRow } from "../calendar/types";
 import {
   toCalendar,
-  toHabit,
   toFlexTask,
   toTimeEntry,
   toCalendarDay,
@@ -31,8 +29,8 @@ import {
   type EventInput,
   type SettingsPatch,
 } from "../calendar/store";
-import { ensureDefaultCalendars, subscribeIcs, importIcs, syncCalendarNow, deleteCalendar } from "../calendar/sources";
-import { isValidDate, addDays, daysBetween, weekStartOf, weekdayOf, dateKey, startOfDay, endOfDay } from "../calendar/dates";
+import { ensureDefaultCalendars, subscribeIcs, importIcs, syncCalendarNow, deleteCalendar, removeCalendarForGood } from "../calendar/sources";
+import { isValidDate, addDays, daysBetween, weekStartOf, dateKey, startOfDay, endOfDay } from "../calendar/dates";
 
 const calendar = new Hono<AppEnv>();
 
@@ -40,7 +38,6 @@ const calendar = new Hono<AppEnv>();
 
 const HEX = /^#[0-9a-fA-F]{6}$/;
 const MAX_SPAN_DAYS = 400;
-const STREAK_LOOKBACK = 400;
 
 const str = (v: unknown, max: number): string => (typeof v === "string" ? v.slice(0, max) : "");
 const trimmed = (v: unknown, max: number): string => (typeof v === "string" ? v.trim().slice(0, max) : "");
@@ -499,7 +496,8 @@ calendar.delete("/sources/:id", async (c) => {
   const userId = c.get("user").id;
   const cal = await ownedCalendar(c.env.DB, userId, c.req.param("id"));
   if (!cal) return c.json({ error: "not_found" }, 404);
-  await deleteCalendar(c.env.DB, cal.id);
+  // A person choosing "Remove" here means it gone, not "gone until the next sync".
+  await removeCalendarForGood(c.env.DB, userId, cal);
   return c.json({ ok: true });
 });
 
@@ -531,7 +529,7 @@ calendar.post("/sources/:id/sync", async (c) => {
  */
 calendar.post("/google/connect-link", async (c) => {
   const user = c.get("user");
-  if (!googleConfigured(c.env)) return c.json({ error: "google_not_configured", message: "Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET secrets." }, 500);
+  if (!(await googleConfigured(c.env))) return c.json({ error: "google_not_configured", message: "Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET secrets." }, 500);
   const b = await body<{ account_id: string; calendar_only: boolean }>(c);
   let hint = "";
   if (typeof b.account_id === "string" && b.account_id) {
@@ -568,166 +566,6 @@ calendar.post("/google/:accountId/disconnect", async (c) => {
     .join(" ");
   await db.prepare(`UPDATE accounts SET scopes = ? WHERE id = ? AND user_id = ?`).bind(kept, acc.id, userId).run();
   return c.json({ ok: true, removed: cals.results.length, ...(await sourcesPayload(c, userId)) });
-});
-
-/* ---------- habits ---------- */
-
-/** `[1,3,5]` → "1,3,5". An absent or unusable list keeps whatever was there before. */
-function parseDays(v: unknown, fallback: string): string {
-  if (!Array.isArray(v)) return fallback;
-  const set = new Set<number>();
-  for (const d of v) if (typeof d === "number" && Number.isInteger(d) && d >= 0 && d <= 6) set.add(d);
-  return set.size ? [...set].sort((a, b) => a - b).join(",") : fallback;
-}
-
-const minDate = (a: string, b: string): string => (daysBetween(a, b) < 0 ? b : a);
-const maxDate = (a: string, b: string): string => (daysBetween(a, b) < 0 ? a : b);
-
-const daysOf = (row: HabitRow): number[] =>
-  row.days
-    .split(",")
-    .map((s) => parseInt(s, 10))
-    .filter((n) => Number.isInteger(n) && n >= 0 && n <= 6);
-
-/**
- * Consecutive expected days, walking back from today. Today is forgiving: an unticked habit on the
- * day you're looking at hasn't broken anything yet, it just hasn't happened.
- */
-function streakOf(row: HabitRow, done: Set<string>, today: string): number {
-  const days = daysOf(row);
-  if (!days.length) return 0;
-  let streak = 0;
-  let d = today;
-  for (let i = 0; i <= STREAK_LOOKBACK; i++) {
-    if (days.includes(weekdayOf(d))) {
-      if (done.has(d)) streak++;
-      else if (d !== today) break;
-    }
-    d = addDays(d, -1);
-  }
-  return streak;
-}
-
-/** Completions for a set of habits over one date window, as a habit_id → dates map. */
-async function completionsFor(db: D1Database, ids: string[], from: string, to: string): Promise<Map<string, string[]>> {
-  const out = new Map<string, string[]>();
-  if (!ids.length) return out;
-  const rows = await db
-    .prepare(`SELECT habit_id, date FROM habit_completions WHERE habit_id IN (${ids.map(() => "?").join(",")}) AND date >= ? AND date <= ? ORDER BY date ASC`)
-    .bind(...ids, from, to)
-    .all<{ habit_id: string; date: string }>();
-  for (const r of rows.results) {
-    const list = out.get(r.habit_id);
-    if (list) list.push(r.date);
-    else out.set(r.habit_id, [r.date]);
-  }
-  return out;
-}
-
-/** Habits with the window's completions and a streak, in one pass over both date ranges. */
-async function habitsWith(db: D1Database, userId: string, today: string, from: string, to: string) {
-  const rows = await db.prepare(`SELECT * FROM habits WHERE user_id = ? ORDER BY position ASC, created_at ASC`).bind(userId).all<HabitRow>();
-  const ids = rows.results.map((r) => r.id);
-  const all = await completionsFor(db, ids, minDate(addDays(today, -STREAK_LOOKBACK), from), maxDate(today, to));
-  return rows.results.map((r) => {
-    const dates = all.get(r.id) ?? [];
-    const inWindow = dates.filter((d) => daysBetween(from, d) >= 0 && daysBetween(d, to) >= 0);
-    return toHabit(r, inWindow, streakOf(r, new Set(dates), today));
-  });
-}
-
-calendar.get("/habits", async (c) => {
-  const { userId, settings, today } = await ctx(c);
-  const qFrom = c.req.query("from") ?? "";
-  const qTo = c.req.query("to") ?? "";
-  if ((qFrom && !isValidDate(qFrom)) || (qTo && !isValidDate(qTo))) return c.json({ error: "bad_date" }, 400);
-  const week = weekStartOf(today, settings.week_start);
-  const from = qFrom || week;
-  const to = qTo || addDays(from, 6);
-  if (daysBetween(from, to) < 0) return c.json({ error: "bad_range" }, 400);
-  if (daysBetween(from, to) > MAX_SPAN_DAYS) return c.json({ error: "range_too_wide" }, 400);
-  return c.json(await habitsWith(c.env.DB, userId, today, from, to));
-});
-
-calendar.post("/habits", async (c) => {
-  const db = c.env.DB;
-  const userId = c.get("user").id;
-  const b = await body<{ name: string; icon: string; color: string; days: number[]; position: number }>(c);
-  const name = trimmed(b.name, 120);
-  if (!name) return c.json({ error: "name_required" }, 400);
-  const color = trimmed(b.color, 7) || "#111111";
-  if (!HEX.test(color)) return c.json({ error: "bad_color" }, 400);
-  const pos = await db.prepare(`SELECT COALESCE(MAX(position), -1) + 1 AS p FROM habits WHERE user_id = ?`).bind(userId).first<{ p: number }>();
-  const id = uid();
-  const t = now();
-  await db
-    .prepare(`INSERT INTO habits (id, user_id, name, icon, color, days, position, archived, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`)
-    .bind(id, userId, name, trimmed(b.icon, 16), color, parseDays(b.days, "0,1,2,3,4,5,6"), int(b.position, 0, 9999, pos?.p ?? 0), t, t)
-    .run();
-  const row = await db.prepare(`SELECT * FROM habits WHERE id = ?`).bind(id).first<HabitRow>();
-  return c.json(toHabit(row!, [], 0));
-});
-
-calendar.patch("/habits/:id", async (c) => {
-  const db = c.env.DB;
-  const { userId, today } = await ctx(c);
-  const row = await db.prepare(`SELECT * FROM habits WHERE id = ? AND user_id = ?`).bind(c.req.param("id"), userId).first<HabitRow>();
-  if (!row) return c.json({ error: "not_found" }, 404);
-  const b = await body<{ name: string; icon: string; color: string; days: number[]; position: number; archived: boolean }>(c);
-  const name = typeof b.name === "string" && b.name.trim() ? b.name.trim().slice(0, 120) : row.name;
-  let color = row.color;
-  if (typeof b.color === "string") {
-    color = b.color.trim().slice(0, 7);
-    if (!HEX.test(color)) return c.json({ error: "bad_color" }, 400);
-  }
-  const icon = typeof b.icon === "string" ? b.icon.trim().slice(0, 16) : row.icon;
-  const days = parseDays(b.days, row.days);
-  const position = int(b.position, 0, 9999, row.position);
-  const archived = typeof b.archived === "boolean" ? (b.archived ? 1 : 0) : row.archived;
-  await db
-    .prepare(`UPDATE habits SET name = ?, icon = ?, color = ?, days = ?, position = ?, archived = ?, updated_at = ? WHERE id = ? AND user_id = ?`)
-    .bind(name, icon, color, days, position, archived, now(), row.id, userId)
-    .run();
-  const fresh = await db.prepare(`SELECT * FROM habits WHERE id = ?`).bind(row.id).first<HabitRow>();
-  const dates = (await completionsFor(db, [row.id], addDays(today, -STREAK_LOOKBACK), today)).get(row.id) ?? [];
-  return c.json(toHabit(fresh!, dates, streakOf(fresh!, new Set(dates), today)));
-});
-
-calendar.delete("/habits/:id", async (c) => {
-  const db = c.env.DB;
-  const userId = c.get("user").id;
-  const row = await db.prepare(`SELECT id FROM habits WHERE id = ? AND user_id = ?`).bind(c.req.param("id"), userId).first<{ id: string }>();
-  if (!row) return c.json({ error: "not_found" }, 404);
-  await db.batch([db.prepare(`DELETE FROM habit_completions WHERE habit_id = ?`).bind(row.id), db.prepare(`DELETE FROM habits WHERE id = ? AND user_id = ?`).bind(row.id, userId)]);
-  return c.json({ ok: true });
-});
-
-// Tick or untick one day. Returns the habit with a recomputed streak so the UI can just swap it in.
-calendar.post("/habits/:id/toggle", async (c) => {
-  const db = c.env.DB;
-  const { userId, today } = await ctx(c);
-  const row = await db.prepare(`SELECT * FROM habits WHERE id = ? AND user_id = ?`).bind(c.req.param("id"), userId).first<HabitRow>();
-  if (!row) return c.json({ error: "not_found" }, 404);
-  const b = await body<{ date: string; done: boolean }>(c);
-  const date = typeof b.date === "string" && b.date ? b.date : today;
-  if (!isValidDate(date)) return c.json({ error: "bad_date" }, 400);
-  const existing = await db.prepare(`SELECT date FROM habit_completions WHERE habit_id = ? AND date = ?`).bind(row.id, date).first<{ date: string }>();
-  const wantDone = typeof b.done === "boolean" ? b.done : !existing;
-  if (wantDone && !existing) {
-    await db.prepare(`INSERT OR IGNORE INTO habit_completions (habit_id, date, done_at) VALUES (?, ?, ?)`).bind(row.id, date, now()).run();
-  } else if (!wantDone && existing) {
-    await db.prepare(`DELETE FROM habit_completions WHERE habit_id = ? AND date = ?`).bind(row.id, date).run();
-  }
-  // Report completions over the window the client is drawing (default: everything the streak looks
-  // at), but always compute the streak from the full lookback.
-  const qFrom = c.req.query("from") ?? "";
-  const qTo = c.req.query("to") ?? "";
-  const lookback = addDays(today, -STREAK_LOOKBACK);
-  const from = isValidDate(qFrom) ? qFrom : lookback;
-  const to = maxDate(isValidDate(qTo) ? qTo : today, date);
-  const all = (await completionsFor(db, [row.id], minDate(lookback, from), to)).get(row.id) ?? [];
-  const inWindow = all.filter((d) => daysBetween(from, d) >= 0 && daysBetween(d, to) >= 0);
-  return c.json(toHabit(row, inWindow, streakOf(row, new Set(all), today)));
 });
 
 /* ---------- days ---------- */
@@ -870,67 +708,6 @@ calendar.delete("/covers/:id", async (c) => {
     db.prepare(`DELETE FROM day_covers WHERE id = ? AND user_id = ?`).bind(id, userId),
   ]);
   return c.json({ ok: true });
-});
-
-/* ---------- journal ---------- */
-
-const excerptOf = (html: string): string => htmlToText(html).replace(/\s+/g, " ").trim().slice(0, 240);
-
-// The index: every day that has an entry, newest first. `?before=` is the previous page's oldest
-// `journal_updated_at`.
-calendar.get("/journal", async (c) => {
-  const userId = c.get("user").id;
-  const before = Number(c.req.query("before") ?? "");
-  const limit = int(Number(c.req.query("limit") ?? ""), 1, 100, 50);
-  const where = Number.isFinite(before) && before > 0 ? ` AND journal_updated_at < ?` : "";
-  const binds: unknown[] = [userId];
-  if (where) binds.push(Math.round(before));
-  const rows = await c.env.DB.prepare(
-    `SELECT * FROM calendar_days WHERE user_id = ? AND journal_html != ''${where} ORDER BY journal_updated_at DESC, date DESC LIMIT ?`
-  )
-    .bind(...binds, limit)
-    .all<CalendarDayRow>();
-  // Shaped as `CalendarDay` plus an excerpt, so the index and the day view share one type.
-  return c.json(
-    rows.results.map((r) => ({
-      date: r.date,
-      label: r.label,
-      cover_url: r.cover_url,
-      cover_id: r.cover_id ?? null,
-      cover_position: r.cover_position || "50% 50%",
-      has_journal: true,
-      excerpt: excerptOf(r.journal_html),
-      journal_updated_at: r.journal_updated_at,
-    })),
-  );
-});
-
-calendar.get("/journal/:date", async (c) => {
-  const userId = c.get("user").id;
-  const date = c.req.param("date");
-  if (!isValidDate(date)) return c.json({ error: "bad_date" }, 400);
-  const row = await dayRow(c.env.DB, userId, date);
-  return c.json({ ...toCalendarDay(row), journal_html: row.journal_html });
-});
-
-calendar.put("/journal/:date", async (c) => {
-  const db = c.env.DB;
-  const userId = c.get("user").id;
-  const date = c.req.param("date");
-  if (!isValidDate(date)) return c.json({ error: "bad_date" }, 400);
-  const b = await body<{ journal_html: string }>(c);
-  if (typeof b.journal_html !== "string") return c.json({ error: "journal_html_required" }, 400);
-  const html = b.journal_html.slice(0, 500_000);
-  const t = now();
-  await db
-    .prepare(
-      `INSERT INTO calendar_days (user_id, date, label, cover_url, journal_html, journal_updated_at, updated_at) VALUES (?, ?, '', '', ?, ?, ?)
-       ON CONFLICT(user_id, date) DO UPDATE SET journal_html = excluded.journal_html, journal_updated_at = excluded.journal_updated_at, updated_at = excluded.updated_at`
-    )
-    .bind(userId, date, html, html.trim() ? t : null, t)
-    .run();
-  const row = await dayRow(db, userId, date);
-  return c.json({ ...toCalendarDay(row), journal_html: row.journal_html });
 });
 
 /* ---------- flex tasks ---------- */

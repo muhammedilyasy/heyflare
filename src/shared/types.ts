@@ -25,7 +25,7 @@ export interface Account {
   id: string;
   email: string;
   display_name: string;
-  provider: "gmail" | "domain";
+  provider: "gmail" | "domain" | "outlook" | "imap";
   domain_id: string | null;
   initial_sync_done: boolean;
   initial_sync_count: number;
@@ -285,13 +285,18 @@ export interface AiSettings {
   presets: AiPreset[];
   last_learned_at: number | null;
   server_ready: boolean;
+  mem0_mode: "own" | "mem0" | "both";
+  mem0_base_url: string;
+  mem0_key_hint: string;
+  mem0_user_id: string;
+  mem0_last_synced_at: number | null;
 }
 export type AiMemoryKind = "profile" | "tone" | "fact" | "preference" | "contact";
 export interface AiMemoryEntry {
   id: string;
   kind: AiMemoryKind;
   content: string;
-  source: "user" | "assistant" | "learned";
+  source: "user" | "assistant" | "learned" | "mem0";
   created_at: number;
   updated_at: number;
 }
@@ -316,8 +321,8 @@ export interface AiDraftCard {
 export type CalendarSource = "local" | "google" | "ics";
 export type EventKind = "event" | "birthday" | "anniversary" | "todo";
 export type Rsvp = "" | "needsAction" | "accepted" | "declined" | "tentative";
-/** HEY has three: a day, a week, a year. No month grid, no agenda list. */
-export type CalendarView = "days" | "week" | "year";
+/** Apple-style: a day, a week, a month, a year. */
+export type CalendarView = "days" | "week" | "month" | "year";
 
 export interface Calendar {
   id: string;
@@ -397,19 +402,6 @@ export interface CalEvent {
   updated_at: number;
 }
 
-export interface Habit {
-  id: string;
-  name: string;
-  icon: string;
-  color: string;
-  days: number[];
-  position: number;
-  archived: boolean;
-  /** YYYY-MM-DD values inside the requested window. */
-  completions?: string[];
-  streak?: number;
-}
-
 export interface FlexTask {
   id: string;
   week_start: string;
@@ -447,15 +439,6 @@ export interface CalendarDay {
   journal_updated_at: number | null;
 }
 
-export interface JournalEntry extends CalendarDay {
-  journal_html: string;
-}
-
-/** A row of the journal index: the day, plus the first plain-text line of its entry. */
-export interface JournalIndexEntry extends CalendarDay {
-  excerpt: string;
-}
-
 export interface CalendarSettings {
   timezone: string;
   week_start: number;
@@ -473,7 +456,6 @@ export interface CalendarRange {
   from: string;
   to: string;
   events: CalEvent[];
-  habits: Habit[];
   days: CalendarDay[];
   flex_tasks: FlexTask[];
   time_entries: TimeEntry[];

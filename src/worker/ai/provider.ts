@@ -53,6 +53,13 @@ export interface AiSettingsRow {
   model: string;
   learn: number;
   auto_send: number;
+  mem0_enabled: number;
+  mem0_mode: "own" | "mem0" | "both";
+  mem0_base_url: string;
+  mem0_api_key_enc: string;
+  mem0_key_hint: string;
+  mem0_user_id: string;
+  mem0_last_synced_at: number | null;
   updated_at: number;
 }
 

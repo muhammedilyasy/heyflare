@@ -37,8 +37,8 @@ const RAMP = [
   "#6c3d47", "#6c4b3d", "#6c633d", "#3d686c",
 ];
 
-const VIEW_LABEL: Record<CalendarView, string> = { days: "Day", week: "Week", year: "Year" };
-const VIEWS: CalendarView[] = ["days", "week", "year"];
+const VIEW_LABEL: Record<CalendarView, string> = { days: "Day", week: "Week", month: "Month", year: "Year" };
+const VIEWS: CalendarView[] = ["days", "week", "month", "year"];
 
 /* ---------- colour ---------- */
 
@@ -177,7 +177,7 @@ function CalendarRow({ c }: { c: Calendar }) {
         title={`Remove ${c.name}?`}
         body={
           c.source === "google"
-            ? "Removes it and its events from heyflare. Google Calendar is untouched — a re-sync brings it back."
+            ? "Removes it and its events from heyflare for good. Google Calendar is untouched; to see it here again, reconnect the account\u2019s calendar access."
             : c.source === "ics"
               ? "Stops following the link and deletes the events it brought in. The feed is untouched."
               : "Deletes the calendar and every event on it. There's no undo."

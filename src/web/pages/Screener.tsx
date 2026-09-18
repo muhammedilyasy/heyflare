@@ -183,10 +183,12 @@ export default function Screener() {
 
   const act = (x: ScreenerSender, d: ScreenStatus, scope: DecisionScope = "all") => {
     if (leaving[x.contact.id]) return;
+    // The card fades first, then the decision fires and (via onMutate) drops it from the cache — firing
+    // both at once would remove the card from the list before the fade ever gets a frame to animate from.
     setLeaving((l) => ({ ...l, [x.contact.id]: d === "screened_out" ? "no" : "yes" }));
     timers.current.push(
       window.setTimeout(() => {
-        decide.mutate({ contact_id: x.contact.id, decision: d, scope });
+        decide.mutate({ contact_id: x.contact.id, decision: d, scope, threads: x.threads });
         setLeaving((l) => {
           const n = { ...l };
           delete n[x.contact.id];

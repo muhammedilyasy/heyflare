@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { ArrowUpRight, ChevronDown, FileText, Inbox, Rss, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useFeed, useBulkAction, type FeedThread } from "../api";
+import { useFeed, useBulkAction, type FeedThread, type FeedBucket } from "../api";
 import { useAccount } from "../context/AccountContext";
 import { ConnectGmailCard } from "./Imbox";
 import { HtmlBody } from "../components/HtmlBody";
@@ -10,7 +10,8 @@ import { LoadMore } from "../components/ThreadList";
 import { Avatar, AccountGlyph } from "../components/Avatar";
 import { EmptyState, ErrorState, PageHeader } from "../components/EmptyState";
 import { useToast } from "../components/Toast";
-import { useCardScroll } from "../lib/cardKeys";
+import { useCardScroll, cardBeingRead } from "../lib/cardKeys";
+import { useKeys } from "../lib/keys";
 import { fmtTime, fmtFull, unsubscribeTarget } from "../lib/format";
 import { Button } from "@/components/ui/button";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
@@ -20,7 +21,27 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 const CAP = 480;
 const OUT_MS = 120;
 
-export function FeedCard({ t, onLeave }: { t: FeedThread; onLeave: (id: string, cb: () => void) => void }) {
+/** Feed and Paper Trail are the same reading UI over two different screener destinations. */
+const COPY: Record<FeedBucket, { title: string; subtitle: string; emptyTitle: string; emptyBody: string; icon: React.ReactNode; other: { bucket: FeedBucket; label: string; icon: React.ReactNode } }> = {
+  feed: {
+    title: "The Feed",
+    subtitle: "Newsletters and long reads. Scroll, don't sort.",
+    emptyTitle: "Your Feed is quiet.",
+    emptyBody: "Screen a newsletter into The Feed and it shows up here, fully opened.",
+    icon: <Rss />,
+    other: { bucket: "paper_trail", label: "Paper Trail", icon: <FileText /> },
+  },
+  paper_trail: {
+    title: "Paper Trail",
+    subtitle: "Receipts, confirmations, and the rest of the paperwork.",
+    emptyTitle: "No paperwork yet.",
+    emptyBody: "Screen a sender into the Paper Trail and their mail shows up here, fully opened.",
+    icon: <FileText />,
+    other: { bucket: "feed", label: "The Feed", icon: <Rss /> },
+  },
+};
+
+export function FeedCard({ t, bucket, onLeave }: { t: FeedThread; bucket: FeedBucket; onLeave: (id: string, cb: () => void) => void }) {
   const bulk = useBulkAction();
   const { toast } = useToast();
   const { multi, glyphFor, accountFor } = useAccount();
@@ -30,6 +51,7 @@ export function FeedCard({ t, onLeave }: { t: FeedThread; onLeave: (id: string, 
   const [expanded, setExpanded] = useState(false);
   const [overflows, setOverflows] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const other = COPY[bucket].other;
 
   // Detect whether the (iframe-sized) body exceeds the cap; re-check as the iframe resizes.
   useEffect(() => {
@@ -46,8 +68,8 @@ export function FeedCard({ t, onLeave }: { t: FeedThread; onLeave: (id: string, 
     };
   }, [m?.id]);
 
-  const move = (bucket: "paper_trail" | "imbox", label: string) =>
-    onLeave(t.id, () => bulk.mutate({ thread_ids: [t.id], action: "move", bucket }, { onSuccess: () => toast(`Moved to ${label}`, { kind: "success" }) }));
+  const move = (target: "imbox" | FeedBucket, label: string) =>
+    onLeave(t.id, () => bulk.mutate({ thread_ids: [t.id], action: "move", bucket: target }, { onSuccess: () => toast(`Moved to ${label}`, { kind: "success" }) }));
 
   return (
     <article className="rounded-md bg-muted/40">
@@ -110,8 +132,8 @@ export function FeedCard({ t, onLeave }: { t: FeedThread; onLeave: (id: string, 
         <Button variant="ghost" size="sm" className="text-muted-foreground" onClick={() => onLeave(t.id, () => bulk.mutate({ thread_ids: [t.id], action: "seen" }, { onSuccess: () => toast("Done", { kind: "success" }) }))}>
           <Check /> <span className="hidden sm:inline">Done</span>
         </Button>
-        <Button variant="ghost" size="sm" className="text-muted-foreground" onClick={() => move("paper_trail", "Paper Trail")}>
-          <FileText /> <span className="hidden sm:inline">Paper Trail</span>
+        <Button variant="ghost" size="sm" className="text-muted-foreground" onClick={() => move(other.bucket, other.label)}>
+          {other.icon} <span className="hidden sm:inline">{other.label}</span>
         </Button>
         <Button variant="ghost" size="sm" className="text-muted-foreground" onClick={() => move("imbox", "Imbox")}>
           <Inbox /> <span className="hidden sm:inline">Imbox</span>
@@ -139,14 +161,24 @@ function CardSkeleton() {
   );
 }
 
-export default function Feed() {
+/** Shared by The Feed and Paper Trail: full-card reading view, "New"/"All" toggle, `e` marks the card being read as done. */
+export function FeedPage({ bucket }: { bucket: FeedBucket }) {
   const { accounts } = useAccount();
   const [show, setShow] = useState<"new" | "all">("new");
-  const feed = useFeed(accounts.length > 0, show);
+  const feed = useFeed(accounts.length > 0, show, bucket);
   const [leaving, setLeaving] = useState<Set<string>>(new Set());
-  const nav = useNavigate();
   const threads = feed.data?.pages.flatMap((p) => p.threads) ?? [];
+  const bulk = useBulkAction();
+  const { toast } = useToast();
+  const copy = COPY[bucket];
   useCardScroll();
+  // `e` is Done on the card being read: the first one still below the top bar.
+  useKeys({
+    e: () => {
+      const id = cardBeingRead();
+      if (id) onLeave(id, () => bulk.mutate({ thread_ids: [id], action: "seen" }, { onSuccess: () => toast("Done", { kind: "success" }) }));
+    },
+  }, accounts.length > 0 && threads.length > 0);
   if (accounts.length === 0) return <ConnectGmailCard />;
   const onLeave = (id: string, cb: () => void) => {
     setLeaving((l) => new Set([...l, id]));
@@ -163,8 +195,8 @@ export default function Feed() {
     <div className="max-w-2xl mx-auto">
       <PageHeader
         className="px-2"
-        title="The Feed"
-        subtitle={threads.length ? `${threads.length}${feed.hasNextPage ? "+" : ""} ${threads.length === 1 && !feed.hasNextPage ? "item" : "items"}. Newsletters and long reads. Scroll, don't sort.` : "Newsletters and long reads. Scroll, don't sort."}
+        title={copy.title}
+        subtitle={threads.length ? `${threads.length}${feed.hasNextPage ? "+" : ""} ${threads.length === 1 && !feed.hasNextPage ? "item" : "items"}. ${copy.subtitle}` : copy.subtitle}
         actions={
           <ToggleGroup type="single" value={show} onValueChange={(v) => v && setShow(v as "new" | "all")} variant="outline" size="sm">
             <ToggleGroupItem value="new" aria-label="Show new">New</ToggleGroupItem>
@@ -179,18 +211,23 @@ export default function Feed() {
           <CardSkeleton />
         </div>
       )}
-      {!feed.isLoading && threads.length === 0 && !feed.error && <EmptyState icon={<Rss />} title="Your Feed is quiet." body="Screen a newsletter into The Feed and it shows up here, fully opened." />}
+      {!feed.isLoading && threads.length === 0 && !feed.error && <EmptyState icon={copy.icon} title={copy.emptyTitle} body={copy.emptyBody} />}
       <div className="space-y-4">
-        {threads.map((t, i) => (
+        {threads.map((t) => (
           <div
             key={t.id}
+            data-feed-card={t.id}
             className={cn("rounded-md scroll-mt-16 transition-opacity duration-100", leaving.has(t.id) && "opacity-0",)}
           >
-            <FeedCard t={t} onLeave={onLeave} />
+            <FeedCard t={t} bucket={bucket} onLeave={onLeave} />
           </div>
         ))}
       </div>
       <LoadMore hasMore={!!feed.hasNextPage} loading={feed.isFetchingNextPage} onMore={() => feed.fetchNextPage()} />
     </div>
   );
+}
+
+export default function Feed() {
+  return <FeedPage bucket="feed" />;
 }

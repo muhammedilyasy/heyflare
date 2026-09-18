@@ -1,15 +1,18 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { Check, ExternalLink, Loader2, Pencil, Plus, RefreshCw, Sparkles, Trash2, X } from "lucide-react";
+import { Check, ChevronsUpDown, ExternalLink, Loader2, Pencil, Plus, RefreshCw, RotateCw, Sparkles, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import type { AiMemoryKind, AiPreset } from "@shared/types";
-import { useAiMemory, useAiMutations, useAiSettings } from "../api";
+import { useAiMemory, useAiMutations, useAiSettings, useAiModels } from "../api";
 import { Section, Row, Danger } from "../pages/Settings";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator } from "@/components/ui/command";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Spinner } from "@/components/ui/spinner";
 import { fmtRelative } from "../lib/format";
 import { cn } from "@/lib/utils";
 
@@ -26,16 +29,22 @@ export function AiSection({ compact }: { compact?: boolean }) {
   const [model, setModel] = useState("");
   const [dirty, setDirty] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
+  const [modelsOpen, setModelsOpen] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [modelQuery, setModelQuery] = useState("");
   useEffect(() => {
     if (!s || dirty) return;
     setPreset(s.preset);
     setBaseUrl(s.preset === "custom" ? s.base_url : "");
     setModel(s.model);
   }, [s, dirty]);
+  const models = useAiModels(modelsOpen, preset, baseUrl, key.trim());
   const inputCls = compact ? "h-11 text-[16px]" : undefined;
   const p = s?.presets.find((x) => x.id === preset) ?? s?.presets[0];
+  const modelOptions = models.data?.models?.length ? models.data.models : (p?.models ?? []);
   const choosePreset = (id: AiPreset["id"]) => {
     const np = s?.presets.find((x) => x.id === id);
+    setModelsOpen(false);
     setPreset(id);
     setModel(np?.default_model ?? "");
     if (id !== "custom") setBaseUrl("");
@@ -67,7 +76,7 @@ export function AiSection({ compact }: { compact?: boolean }) {
             {preset === "custom" && (
               <Field>
                 <FieldLabel htmlFor="ai-base">Base URL</FieldLabel>
-                <Input id="ai-base" value={baseUrl} onChange={(e) => { setBaseUrl(e.target.value); setDirty(true); }} placeholder="http://localhost:11434/v1" className={inputCls} />
+                <Input id="ai-base" value={baseUrl} onChange={(e) => { setBaseUrl(e.target.value); setModelsOpen(false); setDirty(true); }} placeholder="http://localhost:11434/v1" className={inputCls} />
                 <FieldDescription>Any OpenAI-compatible server: Ollama, LM Studio, Groq, Mistral, Together…</FieldDescription>
               </Field>
             )}
@@ -82,9 +91,58 @@ export function AiSection({ compact }: { compact?: boolean }) {
             </Field>
             <Field>
               <FieldLabel htmlFor="ai-model">Model</FieldLabel>
-              <Input id="ai-model" list="ai-models" value={model} onChange={(e) => { setModel(e.target.value); setDirty(true); }} placeholder={p?.default_model} className={inputCls} />
-              <datalist id="ai-models">{(p?.models ?? []).map((x) => <option key={x} value={x} />)}</datalist>
-              <FieldDescription>Type any model id the provider supports.</FieldDescription>
+              <Popover open={pickerOpen} onOpenChange={(o) => { setPickerOpen(o); if (o) setModelsOpen(true); else setModelQuery(""); }}>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" role="combobox" aria-expanded={pickerOpen} className={cn("w-full justify-between font-normal", inputCls)} id="ai-model">
+                    <span className={cn("truncate", !model && "text-muted-foreground")}>{model || p?.default_model || "Select a model"}</span>
+                    <ChevronsUpDown className="size-4 shrink-0 opacity-50" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="start" className="w-(--radix-popover-trigger-width) p-0">
+                  <Command loop>
+                    <CommandInput placeholder="Search models…" value={modelQuery} onValueChange={setModelQuery} />
+                    <CommandList className="max-h-64">
+                      {models.isFetching ? (
+                        <div className="flex items-center justify-center py-6 text-muted-foreground"><Spinner /></div>
+                      ) : (
+                        <>
+                          <CommandEmpty>{modelQuery ? "No matching model." : "No models listed by this endpoint."}</CommandEmpty>
+                          <CommandGroup>
+                            {modelOptions.map((x) => (
+                              <CommandItem key={x} value={x} onSelect={() => { setModel(x); setDirty(true); setPickerOpen(false); }}>
+                                <span className="flex-1 truncate">{x}</span>
+                                <Check className={cn("size-4", model === x ? "opacity-100" : "opacity-0")} />
+                              </CommandItem>
+                            ))}
+                          </CommandGroup>
+                        </>
+                      )}
+                      {modelQuery.trim() && !modelOptions.some((x) => x === modelQuery.trim()) && (
+                        <>
+                          <CommandSeparator />
+                          <CommandGroup forceMount>
+                            <CommandItem value={`use-${modelQuery}`} forceMount onSelect={() => { setModel(modelQuery.trim()); setDirty(true); setPickerOpen(false); }}>
+                              <Plus />
+                              <span className="truncate">Use “{modelQuery.trim()}”</span>
+                            </CommandItem>
+                          </CommandGroup>
+                        </>
+                      )}
+                    </CommandList>
+                  </Command>
+                </PopoverContent>
+              </Popover>
+              <FieldDescription className="flex items-center gap-1">
+                {models.isFetching ? (
+                  <><Loader2 className="size-3 animate-spin" /> Loading models…</>
+                ) : models.data?.error || (models.data?.models?.length === 0 && modelsOpen) ? (
+                  "Couldn't list models from this endpoint — search and pick “Use …” to set one by hand."
+                ) : models.data?.models?.length ? (
+                  `${modelOptions.length} models · search or enter your own`
+                ) : (
+                  "Pick a model, or search to enter any id the provider supports."
+                )}
+              </FieldDescription>
             </Field>
           </FieldGroup>
           <div className={cn("flex items-center gap-2 mt-4", compact && "flex-col items-stretch")}>
@@ -104,9 +162,104 @@ export function AiSection({ compact }: { compact?: boolean }) {
         </Row>
       </Section>
 
+      <Mem0Section compact={compact} settings={s} />
       <MemorySection compact={compact} onClear={() => setClearOpen(true)} lastLearned={s?.last_learned_at ?? null} />
       <Danger open={clearOpen} onOpenChange={setClearOpen} title="Forget everything?" body="Deletes every memory entry and the learning history. The assistant starts from scratch." action="Forget everything" onConfirm={() => m.clearMemory.mutate(undefined, { onSuccess: () => toast("Memory cleared") })} />
     </>
+  );
+}
+
+type Mem0Mode = "own" | "mem0" | "both";
+const MEM0_MODE_LABEL: Record<Mem0Mode, string> = { own: "Only heyflare", mem0: "Only mem0", both: "Both, kept in sync" };
+const MEM0_MODE_HINT: Record<Mem0Mode, string> = {
+  own: "The default. Memory lives only in heyflare; mem0 is not used.",
+  mem0: "Heyflare stores nothing of its own — every read and write goes straight to your mem0 server. Existing heyflare memory moves over once, then this table stays empty.",
+  both: "Heyflare is the store of record. Everything added or edited here also pushes to mem0, and a background check every 10 minutes pulls in anything new from there.",
+};
+
+function Mem0Section({ compact, settings: s }: { compact?: boolean; settings: import("@shared/types").AiSettings | undefined }) {
+  const m = useAiMutations();
+  const [mode, setMode] = useState<Mem0Mode>("own");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [key, setKey] = useState("");
+  const [userId, setUserId] = useState("");
+  const [dirty, setDirty] = useState(false);
+  useEffect(() => {
+    if (!s || dirty) return;
+    setMode(s.mem0_mode);
+    setBaseUrl(s.mem0_base_url);
+    setUserId(s.mem0_user_id);
+  }, [s, dirty]);
+  const inputCls = compact ? "h-11 text-[16px]" : undefined;
+  const save = () =>
+    m.saveSettings.mutate(
+      { mem0_mode: mode, mem0_base_url: baseUrl, mem0_api_key: key.trim() ? key.trim() : undefined, mem0_user_id: userId },
+      {
+        onSuccess: (r) => {
+          if (r.mem0_warning) toast.error(r.mem0_warning);
+          else toast("mem0 settings saved");
+          setKey("");
+          setDirty(false);
+        },
+        onError: (e) => toast.error((e as Error).message),
+      }
+    );
+  const test = () => m.testMem0.mutate(undefined, { onSuccess: (r) => (r.ok ? toast("Connected") : toast.error(r.error ?? "Failed")), onError: (e) => toast.error((e as Error).message) });
+  const sync = () =>
+    m.syncMem0.mutate(undefined, {
+      onSuccess: (r) => toast(`Synced · ${r.pushed} pushed, ${r.pulled} pulled, ${r.updated} updated${r.removed ? `, ${r.removed} removed` : ""}`),
+      onError: (e) => toast.error((e as Error).message),
+    });
+  const active = mode !== "own";
+  return (
+    <Section title="Memory sync (mem0)" description="A self-hosted mem0 server — not the hosted mem0.ai platform — as an alternative or companion store for the assistant's memory.">
+      <div className={cn("px-2", !compact && "max-w-lg")}>
+        <FieldGroup className="gap-4">
+          <Field>
+            <FieldLabel>Where memory lives</FieldLabel>
+            <Select value={mode} onValueChange={(v) => { setMode(v as Mem0Mode); setDirty(true); }}>
+              <SelectTrigger className={cn("w-full", inputCls)}><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {(Object.keys(MEM0_MODE_LABEL) as Mem0Mode[]).map((k) => <SelectItem key={k} value={k}>{MEM0_MODE_LABEL[k]}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <FieldDescription>{MEM0_MODE_HINT[mode]}</FieldDescription>
+          </Field>
+          {active && (
+            <>
+              <Field>
+                <FieldLabel htmlFor="mem0-base">Server URL</FieldLabel>
+                <Input id="mem0-base" value={baseUrl} onChange={(e) => { setBaseUrl(e.target.value); setDirty(true); }} placeholder="http://localhost:8888" className={inputCls} />
+                <FieldDescription>The REST API root of your self-hosted mem0 server (no trailing /memories).</FieldDescription>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="mem0-key">API key</FieldLabel>
+                <Input id="mem0-key" type="password" value={key} onChange={(e) => { setKey(e.target.value); setDirty(true); }} placeholder={s?.mem0_key_hint ? `Stored · ${s.mem0_key_hint}` : "Leave blank if auth is disabled"} autoComplete="off" className={inputCls} />
+                <FieldDescription className="flex items-center gap-2 flex-wrap">
+                  <span>Sent as X-API-Key. Stored encrypted, never shown again.</span>
+                  {s?.mem0_key_hint && <button type="button" className="underline underline-offset-2" onClick={() => m.saveSettings.mutate({ mem0_api_key: null }, { onSuccess: () => toast("Key removed") })}>Remove key</button>}
+                </FieldDescription>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="mem0-userid">mem0 user id (optional)</FieldLabel>
+                <Input id="mem0-userid" value={userId} onChange={(e) => { setUserId(e.target.value); setDirty(true); }} placeholder="Leave blank to use your heyflare account id" className={inputCls} />
+                <FieldDescription>
+                  If other tools already write to this mem0 server under their own identifier (a username, an agent id), put it here so heyflare joins that same scope instead of using its own account id. Changing this moves heyflare's existing entries across, tagged ones only — nothing already under the new id is touched.
+                </FieldDescription>
+              </Field>
+            </>
+          )}
+        </FieldGroup>
+        <div className={cn("flex items-center gap-2 mt-4", compact && "flex-col items-stretch")}>
+          <Button size={compact ? "lg" : "sm"} onClick={save} disabled={m.saveSettings.isPending || (!dirty && !key)}>{m.saveSettings.isPending ? <Loader2 className="animate-spin" /> : <Check />} Save</Button>
+          <Button size={compact ? "lg" : "sm"} variant="outline" onClick={test} disabled={m.testMem0.isPending || !s?.mem0_mode || s.mem0_mode === "own" || dirty}>{m.testMem0.isPending ? <Loader2 className="animate-spin" /> : <Sparkles />} Test connection</Button>
+          {s?.mem0_mode === "both" && !dirty && (
+            <Button size={compact ? "lg" : "sm"} variant="outline" onClick={sync} disabled={m.syncMem0.isPending}>{m.syncMem0.isPending ? <Loader2 className="animate-spin" /> : <RotateCw />} Sync now</Button>
+          )}
+          {s?.mem0_mode === "both" && !dirty && s?.mem0_last_synced_at && <span className="text-[12px] text-muted-foreground">Last synced {fmtRelative(s.mem0_last_synced_at)}</span>}
+        </div>
+      </div>
+    </Section>
   );
 }
 
@@ -150,7 +303,7 @@ function MemorySection({ compact, onClear, lastLearned }: { compact?: boolean; o
                   ) : (
                     <>
                       <span className="flex-1 min-w-0 leading-5">{r.content}</span>
-                      <span className="text-[11px] text-muted-foreground shrink-0 pt-0.5">{r.source === "learned" ? "learned" : r.source === "assistant" ? "assistant" : "you"}</span>
+                      <span className="text-[11px] text-muted-foreground shrink-0 pt-0.5">{r.source === "learned" ? "learned" : r.source === "assistant" ? "assistant" : r.source === "mem0" ? "mem0" : "you"}</span>
                       <span className={cn("flex items-center shrink-0", !compact && "opacity-0 group-hover:opacity-100")}>
                         <Button size="icon-xs" variant="ghost" className="text-muted-foreground" aria-label="Edit" onClick={() => setEditing({ id: r.id, content: r.content })}><Pencil /></Button>
                         <Button size="icon-xs" variant="ghost" className="text-muted-foreground" aria-label="Delete" onClick={() => m.deleteMemory.mutate(r.id)}><Trash2 /></Button>

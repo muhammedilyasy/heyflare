@@ -4,6 +4,7 @@ import type { Env } from "../env";
 import type { UserRow } from "../db";
 import { uid, now } from "../db";
 import { loadAiConfig, makeProvider } from "./provider";
+import { loadMem0State, syncPush, syncUpdate, syncDelete, mem0ListAsRows, mem0AddDirect, mem0UpdateDirect, mem0DeleteDirect, mem0DeleteAllDirect } from "./mem0";
 
 export type MemoryKind = "profile" | "tone" | "fact" | "preference" | "contact";
 export const MEMORY_KINDS: MemoryKind[] = ["profile", "tone", "fact", "preference", "contact"];
@@ -13,7 +14,9 @@ export interface MemoryRow {
   user_id: string;
   kind: MemoryKind;
   content: string;
-  source: "user" | "assistant" | "learned";
+  source: "user" | "assistant" | "learned" | "mem0";
+  mem0_id: string | null;
+  mem0_synced_at: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -21,37 +24,74 @@ export interface MemoryRow {
 const MAX_ENTRIES = 80;
 
 export async function listMemory(env: Env, userId: string): Promise<MemoryRow[]> {
+  const { mode, cfg } = await loadMem0State(env, userId);
+  if (mode === "mem0" && cfg) return mem0ListAsRows(cfg, userId);
   const r = await env.DB.prepare(`SELECT * FROM ai_memory WHERE user_id = ? ORDER BY kind, updated_at DESC`).bind(userId).all<MemoryRow>();
   return r.results;
 }
 
 export async function addMemory(env: Env, userId: string, kind: MemoryKind, content: string, source: MemoryRow["source"]): Promise<MemoryRow> {
+  const validKind = MEMORY_KINDS.includes(kind) ? kind : "fact";
+  const { mode, cfg } = await loadMem0State(env, userId);
+  if (mode === "mem0" && cfg) return mem0AddDirect(cfg, userId, validKind, content);
   const t = now();
-  const row: MemoryRow = { id: uid(), user_id: userId, kind: MEMORY_KINDS.includes(kind) ? kind : "fact", content: content.trim().slice(0, 600), source, created_at: t, updated_at: t };
+  const row: MemoryRow = { id: uid(), user_id: userId, kind: validKind, content: content.trim().slice(0, 600), source, mem0_id: null, mem0_synced_at: null, created_at: t, updated_at: t };
   await env.DB.prepare(`INSERT INTO ai_memory (id, user_id, kind, content, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
     .bind(row.id, row.user_id, row.kind, row.content, row.source, t, t)
     .run();
   await trimMemory(env, userId);
+  if (mode === "both" && cfg) {
+    const synced = await syncPush(cfg, row);
+    if (synced) {
+      row.mem0_id = synced.mem0_id;
+      row.mem0_synced_at = synced.mem0_synced_at;
+      await env.DB.prepare(`UPDATE ai_memory SET mem0_id = ?, mem0_synced_at = ? WHERE id = ?`).bind(synced.mem0_id, synced.mem0_synced_at, row.id).run();
+    }
+  }
   return row;
 }
 
 export async function updateMemory(env: Env, userId: string, id: string, patch: { kind?: MemoryKind; content?: string }): Promise<MemoryRow | null> {
+  const { mode, cfg } = await loadMem0State(env, userId);
+  if (mode === "mem0" && cfg) {
+    try {
+      return await mem0UpdateDirect(cfg, userId, id, patch);
+    } catch {
+      return null;
+    }
+  }
   const cur = await env.DB.prepare(`SELECT * FROM ai_memory WHERE id = ? AND user_id = ?`).bind(id, userId).first<MemoryRow>();
   if (!cur) return null;
   const kind = patch.kind && MEMORY_KINDS.includes(patch.kind) ? patch.kind : cur.kind;
   const content = typeof patch.content === "string" ? patch.content.trim().slice(0, 600) : cur.content;
-  await env.DB.prepare(`UPDATE ai_memory SET kind = ?, content = ?, updated_at = ? WHERE id = ?`).bind(kind, content, now(), id).run();
-  return { ...cur, kind, content, updated_at: now() };
+  const t = now();
+  let mem0SyncedAt = cur.mem0_synced_at;
+  if (mode === "both" && cfg && cur.mem0_id && content !== cur.content) mem0SyncedAt = (await syncUpdate(cfg, cur.mem0_id, content)) ?? mem0SyncedAt;
+  await env.DB.prepare(`UPDATE ai_memory SET kind = ?, content = ?, updated_at = ?, mem0_synced_at = ? WHERE id = ?`).bind(kind, content, t, mem0SyncedAt, id).run();
+  return { ...cur, kind, content, mem0_synced_at: mem0SyncedAt, updated_at: t };
 }
 
 export async function deleteMemory(env: Env, userId: string, id: string): Promise<boolean> {
+  const { mode, cfg } = await loadMem0State(env, userId);
+  if (mode === "mem0" && cfg) return mem0DeleteDirect(cfg, id);
+  const cur = await env.DB.prepare(`SELECT mem0_id FROM ai_memory WHERE id = ? AND user_id = ?`).bind(id, userId).first<{ mem0_id: string | null }>();
   const r = await env.DB.prepare(`DELETE FROM ai_memory WHERE id = ? AND user_id = ?`).bind(id, userId).run();
-  return (r.meta.changes ?? 0) > 0;
+  const deleted = (r.meta.changes ?? 0) > 0;
+  if (deleted && mode === "both" && cfg && cur?.mem0_id) await syncDelete(cfg, cur.mem0_id);
+  return deleted;
 }
 
 export async function clearMemory(env: Env, userId: string): Promise<void> {
+  const { mode, cfg } = await loadMem0State(env, userId);
+  if (mode === "mem0" && cfg) {
+    await mem0DeleteAllDirect(cfg);
+    await env.DB.prepare(`DELETE FROM ai_learning_state WHERE user_id = ?`).bind(userId).run();
+    return;
+  }
+  const linked = await env.DB.prepare(`SELECT mem0_id FROM ai_memory WHERE user_id = ? AND mem0_id IS NOT NULL`).bind(userId).all<{ mem0_id: string }>();
   await env.DB.prepare(`DELETE FROM ai_memory WHERE user_id = ?`).bind(userId).run();
   await env.DB.prepare(`DELETE FROM ai_learning_state WHERE user_id = ?`).bind(userId).run();
+  if (mode === "both" && cfg) await Promise.all(linked.results.map((r) => syncDelete(cfg, r.mem0_id)));
 }
 
 async function trimMemory(env: Env, userId: string) {

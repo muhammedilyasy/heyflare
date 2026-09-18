@@ -37,7 +37,7 @@ function stepMonth(key: string, delta: number): string {
 }
 
 function MonthScreen() {
-  const { cursor, setCursor, setView, view, today, settings, range, eventsOn, createEvent, openEvent } = useCalendar();
+  const { cursor, setCursor, setView, view, today, settings, eventsOn, createEvent, openEvent } = useCalendar();
   const nav = useNavigate();
   const qc = useQueryClient();
   const { syncAll } = useCalendarSourceMutations();
@@ -65,7 +65,6 @@ function MonthScreen() {
   });
 
   const grid = useMemo(() => monthGrid(cursor, settings.week_start), [cursor, settings.week_start]);
-  const journalDays = useMemo(() => new Set((range?.days ?? []).filter((d) => d.has_journal).map((d) => d.date)), [range]);
 
   const selected = eventsOn(cursor);
   // A committed swipe throws dx to ±innerWidth; the month has already changed under it, so snap
@@ -121,7 +120,6 @@ function MonthScreen() {
                 date={k}
                 month={cursor}
                 selected={k === cursor}
-                journal={journalDays.has(k)}
                 onTap={() => {
                   // A month swipe must not also land as a tap on whichever square it started on.
                   if (swipe.consumeClick()) return;
@@ -174,7 +172,7 @@ function MonthScreen() {
 }
 
 /** One square of the month grid: the date, up to three event dots, and the day's marks. */
-function DayCell({ date, month, selected, journal, onTap }: { date: string; month: string; selected: boolean; journal: boolean; onTap: () => void }) {
+function DayCell({ date, month, selected, onTap }: { date: string; month: string; selected: boolean; onTap: () => void }) {
   const { eventsOn } = useCalendar();
   const { allDay, timed } = eventsOn(date);
   // All-day items read as filled dots, timed ones as hollow — three at most, whatever the day holds.
@@ -204,8 +202,6 @@ function DayCell({ date, month, selected, journal, onTap }: { date: string; mont
       >
         {dayNumber(date)}
       </span>
-      {/* A day with a journal entry: a small square in the corner, so it never reads as an event dot. */}
-      {journal && <span className="absolute top-1 right-1 size-[3px] rounded-[1px] bg-foreground/50" />}
       <span className="flex items-center gap-[3px] h-[5px]">
         {dots.map((solid, i) => (
           <span key={i} className={cn("size-[5px] rounded-full", solid ? "bg-foreground/75" : "border border-foreground/55")} />

@@ -1,7 +1,8 @@
-import { startGoogleConnect } from "../lib/connect";
+import { startGoogleConnect, startMicrosoftConnect } from "../lib/connect";
+import { useAccount } from "../context/AccountContext";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowUpCircle, Bookmark, CalendarClock, CalendarDays, Clock, Eye, FileText, Files, FolderOpen, Inbox, Keyboard, Mail, Moon, NotebookPen, PenSquare, Plus, Repeat, Rss, Scissors, Send, Settings, Shield, ShieldOff, Sparkles, Sun, Tag, Trash2, Users } from "lucide-react";
+import { ArrowUpCircle, Bookmark, CalendarClock, CalendarDays, Clock, Eye, FileText, Files, FolderOpen, Inbox, Keyboard, Mail, Moon, PenSquare, Plus, Rss, Scissors, Send, Settings, Shield, ShieldOff, Sparkles, Sun, Tag, Trash2, Users } from "lucide-react";
 import { useSearch } from "../api";
 import { fmtTime } from "../lib/format";
 import { Avatar } from "./Avatar";
@@ -28,8 +29,6 @@ const DESTINATIONS: { to: string; label: string; icon: ReactNode; kbd?: string; 
   { to: "/screened-out", label: "Screened out", icon: <ShieldOff /> },
   { to: "/trash", label: "Trash", icon: <Trash2 /> },
   { to: "/calendar", label: "Calendar", icon: <CalendarDays />, kbd: "0", keywords: "events schedule meetings agenda" },
-  { to: "/journal", label: "Journal", icon: <NotebookPen />, keywords: "diary write day" },
-  { to: "/habits", label: "Habits", icon: <Repeat />, keywords: "streak daily routine" },
   { to: "/settings", label: "Settings", icon: <Settings /> },
 ];
 
@@ -62,6 +61,7 @@ export function CommandPalette({
   hasAccount?: boolean;
 }) {
   const nav = useNavigate();
+  const { googleConfigured, microsoftConfigured } = useAccount();
   const [q, setQ] = useState("");
   const dq = useDebounced(q.trim(), 200);
   const search = useSearch(hasAccount && open ? dq : "");
@@ -73,11 +73,12 @@ export function CommandPalette({
     () => [
       { id: "compose", label: "Compose a new message", icon: <PenSquare />, kbd: "c", run: onCompose, keywords: "write new email" },
       ...(onAssistant ? [{ id: "assistant", label: "Open the Assistant", icon: <Sparkles />, kbd: "⌘J", run: onAssistant, keywords: "ai chat help" }] : []),
-      { id: "connect", label: "Connect a Gmail account", icon: <Plus />, run: () => startGoogleConnect(), keywords: "google add account" },
+      ...(googleConfigured ? [{ id: "connect", label: "Connect a Gmail account", icon: <Plus />, run: () => startGoogleConnect(), keywords: "google add account" }] : []),
+      ...(microsoftConfigured ? [{ id: "connect-ms", label: "Connect an Outlook account", icon: <Plus />, run: () => startMicrosoftConnect(), keywords: "microsoft outlook office365 add account" }] : []),
       { id: "theme", label: theme === "dark" ? "Switch to light theme" : "Switch to dark theme", icon: theme === "dark" ? <Sun /> : <Moon />, run: onToggleTheme, keywords: "dark light mode appearance" },
       { id: "shortcuts", label: "Keyboard shortcuts", icon: <Keyboard />, kbd: "?", run: onShortcuts },
     ],
-    [onCompose, onToggleTheme, onShortcuts, onAssistant, theme],
+    [onCompose, onToggleTheme, onShortcuts, onAssistant, theme, googleConfigured, microsoftConfigured],
   );
   const mail = dq ? (search.data?.pages.flatMap((p) => p.threads) ?? []).slice(0, 8) : [];
   const go = (fn: () => void) => {

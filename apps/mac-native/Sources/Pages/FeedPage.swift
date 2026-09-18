@@ -1,0 +1,250 @@
+import SwiftUI
+import AppKit
+
+/// `FeedCard`: the message opened right in the list, capped, with its actions.
+struct FeedCard: View {
+    let thread: ThreadSummary
+    /// Fade the card, run the action; `removes` says whether the page may drop it at once
+    /// (a move is optimistic on the web, `seen` is not — that card waits for the refetch).
+    var onLeave: (String, _ removes: Bool, @escaping () -> Void) -> Void
+
+    @Environment(AppState.self) private var app
+    @Environment(Router.self) private var router
+    @State private var expanded = false
+    @State private var bodyHeight: CGFloat = 0
+    @State private var subjectHover = false
+
+    private let cap: CGFloat = 480
+    private var m: Message? { thread.latestMessage }
+    private var unsubscribe: (url: URL?, mailto: String?) {
+        let h = m?.listUnsubscribe ?? ""
+        var url: URL?; var mailto: String?
+        if let r = h.range(of: #"https?://[^>,\s]+"#, options: .regularExpression) { url = URL(string: String(h[r])) }
+        if let r = h.range(of: #"mailto:([^>,\s?]+)"#, options: .regularExpression) { mailto = String(h[r]).replacingOccurrences(of: "mailto:", with: "") }
+        return (url, mailto)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                WAvatar(thread.lastFrom, size: 20)
+                Text(thread.lastFrom.name.isEmpty ? thread.lastFrom.email : thread.lastFrom.name).font(W.font(14, 500)).lineLimit(1)
+                if app.accounts.count > 1 { AccountGlyph(glyph: app.glyph(for: thread.accountID), label: app.account(thread.accountID)?.email) }
+                Text(thread.lastFrom.email).font(W.xs).foregroundStyle(W.mutedForeground).lineLimit(1)
+                Spacer()
+                Text(Fmt.time(thread.lastMessageAt)).font(W.xs).monospacedDigit().foregroundStyle(W.mutedForeground).help(Fmt.full(thread.lastMessageAt))
+            }
+            .padding(.horizontal, 20).padding(.top, 20)
+            Button { router.go(.thread(thread.id, peek: false)) } label: {
+                // `hover:underline underline-offset-2`
+                Text(thread.displaySubject).font(W.font(20, 600)).tracking(-0.2).underline(subjectHover).foregroundStyle(W.foreground).multilineTextAlignment(.leading).lineSpacing(3)
+                    .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { subjectHover = $0 }
+            .padding(.horizontal, 20).padding(.top, 12)
+
+            ZStack(alignment: .bottom) {
+                Group {
+                    if let m { HtmlBodyView(html: m.htmlBody, text: m.textBody, trackers: m.trackers) } else { Text(thread.snippet).font(W.sm) }
+                }
+                .background(GeometryReader { g in Color.clear.onChange(of: g.size.height, initial: true) { _, h in bodyHeight = h } })
+                .frame(maxHeight: expanded ? nil : cap, alignment: .top)
+                .clipped()
+                if !expanded && bodyHeight > cap + 24 {
+                    LinearGradient(colors: [W.background.opacity(0), W.background.opacity(0.8), W.background], startPoint: .top, endPoint: .bottom)
+                        .frame(height: 96)
+                        .overlay(alignment: .bottom) { WButton("Read more", trailingIcon: "chevronDown", variant: .outline, size: .sm) { expanded = true }.padding(.bottom, 8) }
+                }
+            }
+            .padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 4)
+
+            HStack(spacing: 4) {
+                WButton("Open thread", variant: .ghost, size: .sm, muted: true) { router.go(.thread(thread.id, peek: false)) }
+                if let url = unsubscribe.url {
+                    WButton("Unsubscribe", trailingIcon: "arrowUpRight", variant: .ghost, size: .sm, muted: true) { NSWorkspace.shared.open(url) }
+                } else if let mailto = unsubscribe.mailto {
+                    // `<a href="mailto:…">`: the system mail link, not the in-app composer.
+                    WButton("Unsubscribe", trailingIcon: "arrowUpRight", variant: .ghost, size: .sm, muted: true, help: "Email \(mailto) to unsubscribe") {
+                        if let url = URL(string: "mailto:\(mailto)") { NSWorkspace.shared.open(url) }
+                    }
+                }
+                Spacer()
+                WButton("Done", icon: "check", variant: .ghost, size: .sm, muted: true) { onLeave(thread.id, false) { Mail.bulk([thread.id], .seen, toast: "Done") } }
+                WButton("Paper Trail", icon: "fileText", variant: .ghost, size: .sm, muted: true) { onLeave(thread.id, true) { Mail.bulk([thread.id], .move(.paperTrail), toast: "Moved to Paper Trail") } }
+                WButton("Imbox", icon: "inbox", variant: .ghost, size: .sm, muted: true) { onLeave(thread.id, true) { Mail.bulk([thread.id], .move(.imbox), toast: "Moved to Imbox") } }
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+        }
+        .background(W.muted40)
+        .rounded(W.radiusMd)
+    }
+}
+
+/// `Feed.tsx`.
+struct FeedPage: View {
+    @Environment(AppState.self) private var app
+    @Environment(UIState.self) private var ui
+    @State private var store = FeedStore()
+    @State private var show = "new"
+    @State private var leaving: Set<String> = []
+    @State private var tops = CardTops()
+
+    private var filter: FeedFilter { show == "all" ? .all : .new }
+
+    var body: some View {
+        if app.accounts.isEmpty { ConnectGmailCard() } else {
+            let n = store.threads.count
+            PageColumn(width: 672) {
+                PageHeader(title: "The Feed", subtitle: n > 0 ? "\(n)\(store.hasMore ? "+" : "") \(n == 1 && !store.hasMore ? "item" : "items"). Newsletters and long reads. Scroll, don't sort." : "Newsletters and long reads. Scroll, don't sort.") {
+                    // `ToggleGroup variant="outline" size="sm"`: two separate outlined pills, gap-2.
+                    WToggleGroup(options: [ToggleOption(id: "new", label: "New", help: "Show new"), ToggleOption(id: "all", label: "All", help: "Show everything")], value: $show, outline: true, spacing: 8)
+                }
+                .padding(.horizontal, 8)
+                if let error = store.error { ErrorStateView(message: error) { Task { await store.refresh(filter) } } }
+                if store.loading && store.threads.isEmpty {
+                    VStack(spacing: 16) { FeedSkeleton(); FeedSkeleton() }
+                }
+                if !store.loading && store.threads.isEmpty && store.error == nil {
+                    EmptyStateView(icon: "rss", title: "Your Feed is quiet.", body: "Screen a newsletter into The Feed and it shows up here, fully opened.")
+                }
+                LazyVStack(spacing: 16) {
+                    ForEach(store.threads) { t in
+                        FeedCard(thread: t, onLeave: leave).opacity(leaving.contains(t.id) ? 0 : 1).id(t.id).trackCard(t.id, in: tops)
+                    }
+                }
+                LoadMore(hasMore: store.hasMore, loading: store.loadingMore) { Task { await store.loadMore(filter) } }
+            }
+            .task { await store.firstLoad(filter) }
+            .onChange(of: show) { _, _ in Task { await store.refresh(filter) } }
+            .syncsWithMail { await store.refresh(filter) }
+            // A reading page: arrows scroll it. `e` is Done on the card being read.
+            .cardScrollKeys(enabled: ui.region == .content)
+            .onKeys(["e": { if let id = tops.current(store.threads.map(\.id)) { leave(id, false) { Mail.bulk([id], .seen, toast: "Done") } } }], enabled: ui.region == .content && !store.threads.isEmpty)
+        }
+    }
+
+    /// `onLeave`: fade for 120ms, then run. A move leaves the list at once (the web removes it
+    /// optimistically); `seen` does not — the card stays until the refetch settles it.
+    private func leave(_ id: String, _ removes: Bool, _ then: @escaping () -> Void) {
+        leaving.insert(id)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            then()
+            if removes { _ = store.remove(id) }
+            leaving.remove(id)
+        }
+    }
+}
+
+/// `CardSkeleton`: `p-5 space-y-4`, bars at 30% / 70% / 100% / 92% / 80%.
+struct FeedSkeleton: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) { SkeletonBlock(width: 20, height: 20, radius: 4); PctSkeleton(pct: 0.3) }
+            PctSkeleton(pct: 0.7, height: 20)
+            VStack(alignment: .leading, spacing: 8) { PctSkeleton(); PctSkeleton(pct: 0.92); PctSkeleton(pct: 0.8); SkeletonBlock(height: 128) }
+        }
+        .padding(20)
+        .background(W.muted40)
+        .rounded(W.radiusMd)
+    }
+}
+
+/// `BundlePage.tsx`: a bundle read like The Feed.
+struct BundlePage: View {
+    let bundleID: String
+    @Environment(Router.self) private var router
+    @Environment(UIState.self) private var ui
+    @State private var tops = CardTops()
+    @Environment(DialogState.self) private var dialogs
+    @Environment(Toasts.self) private var toasts
+    @State private var store = BundleStore()
+    @State private var leaving: Set<String> = []
+    @State private var marked = false
+    @State private var contactHover = false
+
+    var body: some View {
+        if let error = store.error, store.detail == nil {
+            ErrorStateView(message: error) { Task { await store.firstLoad(bundleID) } }
+        } else if let d = store.detail {
+            let b = d.bundle
+            PageColumn(width: 672) {
+                WButton("Back", icon: "arrowLeft", variant: .ghost, size: .sm, muted: true, kbd: "esc") { router.back() }.padding(.bottom, 12)
+                HStack(spacing: 12) {
+                    BundleAvatar(email: b.email, name: b.name, src: b.avatarURL, size: 40)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 8) {
+                            Text(b.name.isEmpty ? b.email : b.name).font(W.font(22, 600)).tracking(-0.22).lineLimit(1)
+                            Icon("layers", size: 16).foregroundStyle(W.mutedForeground)
+                        }
+                        HStack(spacing: 4) {
+                            Text("\(b.messageCount) \(b.messageCount == 1 ? "message" : "messages") · \(b.threadCount) \(b.threadCount == 1 ? "thread" : "threads") ·")
+                            // `hover:text-foreground underline-offset-2 hover:underline`
+                            Button { router.go(.contact(b.contactID)) } label: { Text("Open contact").underline(contactHover).foregroundStyle(contactHover ? W.foreground : W.mutedForeground) }.buttonStyle(.plain).onHover { contactHover = $0 }
+                        }
+                        .font(W.s13).monospacedDigit().foregroundStyle(W.mutedForeground)
+                    }
+                    Spacer()
+                    if b.isOpen && !store.closed {
+                        WButton("Mark as seen", icon: "check", variant: .outline, size: .sm) { Task { _ = await store.markAllSeen(bundleID); Mail.invalidate(); toasts.show("Marked as seen") } }
+                    } else {
+                        WButton("Mark unread", icon: "mailOpen", variant: .outline, size: .sm) { Task { try? await APIClient.shared.markBundleUnseen(bundleID); await store.refresh(bundleID); Mail.invalidate(); toasts.show("Marked unread") } }
+                    }
+                    WButton("Unbundle", icon: "ungroup", variant: .ghost, size: .sm, muted: true) {
+                        dialogs.confirm(title: "Unbundle these messages?", description: "The \(b.threadCount) \(b.threadCount == 1 ? "thread" : "threads") in this bundle go back to being separate rows. The sender stays bundled for future mail; turn that off on their contact page.", action: "Unbundle") {
+                            Task {
+                                do { try await APIClient.shared.delete("/api/bundles/\(bundleID)") } catch { toasts.error((error as? APIError)?.errorDescription ?? error.localizedDescription); return }
+                                Mail.invalidate(); toasts.show("Unbundled")
+                                router.go(b.latest.bucket == .paperTrail ? .paperTrail : .imbox)
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 8).padding(.bottom, 24)
+                LazyVStack(spacing: 16) {
+                    ForEach(store.threads.filter { $0.latestMessage != nil }) { t in
+                        FeedCard(thread: t, onLeave: leave).opacity(leaving.contains(t.id) ? 0 : 1).trackCard(t.id, in: tops)
+                    }
+                    if store.threads.isEmpty { Text("Nothing in this bundle yet.").font(W.sm).foregroundStyle(W.mutedForeground).padding(.horizontal, 8) }
+                }
+            }
+            .onKeys(["Escape": { router.back() }])
+            .cardScrollKeys(enabled: ui.region == .content)
+            .onKeys(["e": { if let id = tops.current(store.threads.map(\.id)) { leave(id, false) { Mail.bulk([id], .seen, toast: "Done") } } }], enabled: ui.region == .content && !store.threads.isEmpty)
+            .task {
+                if b.isOpen && !marked { marked = true; _ = await store.markAllSeen(bundleID); Mail.invalidate() }
+            }
+        } else {
+            PageColumn(width: 672) { SkeletonBlock(width: 192, height: 32).padding(.bottom, 12); SkeletonBlock(height: 160).padding(.bottom, 12); SkeletonBlock(height: 160) }
+                .task { await store.firstLoad(bundleID) }
+        }
+    }
+
+    private func leave(_ id: String, _ removes: Bool, _ then: @escaping () -> Void) {
+        leaving.insert(id)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { then(); if removes { _ = store.remove(id) }; leaving.remove(id) }
+    }
+}
+
+
+/// Where each card sits in the window, so a key can act on the one being read: the first
+/// card whose bottom is still below the top bar.
+@MainActor
+@Observable
+final class CardTops {
+    @ObservationIgnored var frames: [String: CGRect] = [:]
+    func current(_ order: [String]) -> String? {
+        order.first { id in (frames[id]?.maxY ?? -1) > 44 + 24 }
+    }
+}
+
+extension View {
+    func trackCard(_ id: String, in tops: CardTops) -> some View {
+        background(GeometryReader { g in
+            Color.clear
+                .onAppear { tops.frames[id] = g.frame(in: .named("window")) }
+                .onChange(of: g.frame(in: .named("window"))) { _, f in tops.frames[id] = f }
+                .onDisappear { tops.frames[id] = nil }
+        })
+    }
+}

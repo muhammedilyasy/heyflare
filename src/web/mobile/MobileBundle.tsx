@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Check, MailOpen, MoreHorizontal, Ungroup, User } from "lucide-react";
 import { toast } from "sonner";
-import { useBundle, useBundleMutations, type FeedThread } from "../api";
+import { useBundle, useBundleMutations, type FeedThread, type FeedBucket } from "../api";
 import { BundleAvatar } from "../components/Avatar";
 import { ErrorState } from "../components/EmptyState";
 import { Button } from "@/components/ui/button";
@@ -41,6 +41,7 @@ export default function MobileBundle() {
   };
   const threads = (q.data?.threads ?? []).filter((t) => t.latest_message) as FeedThread[];
   const bucketPath = b?.latest?.bucket === "paper_trail" ? "/paper-trail" : "/";
+  const cardBucket: FeedBucket = b?.latest?.bucket === "paper_trail" ? "paper_trail" : "feed";
   return (
     <Screen
       title={b?.name || b?.email || "Bundle"}
@@ -76,7 +77,7 @@ export default function MobileBundle() {
       <div className="divide-y divide-border">
         {threads.map((t) => (
           <div key={t.id} className={leaving.has(t.id) ? "opacity-0 transition-opacity duration-150" : "transition-opacity duration-150"}>
-            <MobileFeedCard t={t} onLeave={onLeave} />
+            <MobileFeedCard t={t} bucket={cardBucket} onLeave={onLeave} />
           </div>
         ))}
       </div>

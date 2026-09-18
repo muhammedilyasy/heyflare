@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { ArrowUpRight, ChevronDown, FileText, Inbox, Rss, Check } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { useFeed, useBulkAction, type FeedThread } from "../api";
+import { useFeed, useBulkAction, type FeedThread, type FeedBucket } from "../api";
 import { useAccount } from "../context/AccountContext";
 import { HtmlBody } from "../components/HtmlBody";
 import { LoadMore } from "../components/ThreadList";
@@ -20,7 +20,27 @@ import { usePullToRefresh } from "./usePullToRefresh";
 
 const CAP = 360;
 
-export function MobileFeedCard({ t, onLeave }: { t: FeedThread; onLeave: (id: string, cb: () => void) => void }) {
+/** The Feed and Paper Trail are the same reading UI over two different screener destinations. */
+const COPY: Record<FeedBucket, { title: string; subtitle: string; emptyTitle: string; emptyBody: string; icon: React.ReactNode; other: { bucket: FeedBucket; label: string; icon: React.ReactNode } }> = {
+  feed: {
+    title: "The Feed",
+    subtitle: "Newsletters and long reads. Scroll, don't sort.",
+    emptyTitle: "Your Feed is quiet.",
+    emptyBody: "Screen a newsletter into The Feed and it shows up here, fully opened.",
+    icon: <Rss />,
+    other: { bucket: "paper_trail", label: "Paper Trail", icon: <FileText /> },
+  },
+  paper_trail: {
+    title: "Paper Trail",
+    subtitle: "Receipts, confirmations, and the rest of the paperwork.",
+    emptyTitle: "No paperwork yet.",
+    emptyBody: "Screen a sender into the Paper Trail and their mail shows up here, fully opened.",
+    icon: <FileText />,
+    other: { bucket: "feed", label: "The Feed", icon: <Rss /> },
+  },
+};
+
+export function MobileFeedCard({ t, bucket, onLeave }: { t: FeedThread; bucket: FeedBucket; onLeave: (id: string, cb: () => void) => void }) {
   const bulk = useBulkAction();
   const nav = useNavigate();
   const { multi, glyphFor, accountFor } = useAccount();
@@ -30,6 +50,7 @@ export function MobileFeedCard({ t, onLeave }: { t: FeedThread; onLeave: (id: st
   const [expanded, setExpanded] = useState(false);
   const [overflows, setOverflows] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const other = COPY[bucket].other;
   useEffect(() => {
     const el = bodyRef.current;
     if (!el) return;
@@ -43,7 +64,7 @@ export function MobileFeedCard({ t, onLeave }: { t: FeedThread; onLeave: (id: st
       clearTimeout(t1);
     };
   }, [m?.id]);
-  const move = (bucket: "paper_trail" | "imbox", label: string) => onLeave(t.id, () => bulk.mutate({ thread_ids: [t.id], action: "move", bucket }, { onSuccess: () => toast(`Moved to ${label}`) }));
+  const move = (target: "imbox" | FeedBucket, label: string) => onLeave(t.id, () => bulk.mutate({ thread_ids: [t.id], action: "move", bucket: target }, { onSuccess: () => toast(`Moved to ${label}`) }));
   return (
     <article className="bg-background">
       <header className="flex items-center gap-2.5 px-4 pt-4">
@@ -85,20 +106,22 @@ export function MobileFeedCard({ t, onLeave }: { t: FeedThread; onLeave: (id: st
         ) : null}
         <span className="flex-1" />
         <Button variant="ghost" size="icon" className="text-muted-foreground size-10" aria-label="Done" onClick={() => onLeave(t.id, () => bulk.mutate({ thread_ids: [t.id], action: "seen" }, { onSuccess: () => toast("Done") }))}><Check /></Button>
-        <Button variant="ghost" size="icon" className="text-muted-foreground size-10" aria-label="Move to Paper Trail" onClick={() => move("paper_trail", "Paper Trail")}><FileText /></Button>
+        <Button variant="ghost" size="icon" className="text-muted-foreground size-10" aria-label={`Move to ${other.label}`} onClick={() => move(other.bucket, other.label)}>{other.icon}</Button>
         <Button variant="ghost" size="icon" className="text-muted-foreground size-10" aria-label="Move to Imbox" onClick={() => move("imbox", "Imbox")}><Inbox /></Button>
       </footer>
     </article>
   );
 }
 
-export default function MobileFeed() {
+/** Shared by The Feed and Paper Trail: full-card reading view with a "New"/"All" toggle. */
+export function MobileFeedPage({ bucket }: { bucket: FeedBucket }) {
   const { accounts } = useAccount();
   const [show, setShow] = useState<"new" | "all">("new");
-  const feed = useFeed(accounts.length > 0, show);
+  const feed = useFeed(accounts.length > 0, show, bucket);
   const [leaving, setLeaving] = useState<Set<string>>(new Set());
   const ptr = usePullToRefresh(() => feed.refetch(), accounts.length > 0);
   const threads = feed.data?.pages.flatMap((p) => p.threads) ?? [];
+  const copy = COPY[bucket];
   const onLeave = (id: string, cb: () => void) => {
     setLeaving((l) => new Set([...l, id]));
     window.setTimeout(() => {
@@ -112,9 +135,11 @@ export default function MobileFeed() {
   };
   return (
     <Screen
-      title="The Feed"
+      title={copy.title}
       largeTitle
-      subtitle={accounts.length ? "Newsletters and long reads. Scroll, don't sort." : undefined}
+      back="/more"
+      backLabel="More"
+      subtitle={accounts.length ? copy.subtitle : undefined}
       fab={accounts.length > 0}
       titleRight={
         accounts.length > 0 ? (
@@ -138,11 +163,11 @@ export default function MobileFeed() {
               <Skeleton className="h-48" />
             </div>
           )}
-          {!feed.isLoading && threads.length === 0 && !feed.error && <MobileEmpty icon={<Rss />} title="Your Feed is quiet." body="Screen a newsletter into The Feed and it shows up here, fully opened." />}
+          {!feed.isLoading && threads.length === 0 && !feed.error && <MobileEmpty icon={copy.icon} title={copy.emptyTitle} body={copy.emptyBody} />}
           <div className="divide-y divide-border">
             {threads.map((t) => (
               <div key={t.id} className={cn("transition-opacity duration-150", leaving.has(t.id) && "opacity-0")}>
-                <MobileFeedCard t={t} onLeave={onLeave} />
+                <MobileFeedCard t={t} bucket={bucket} onLeave={onLeave} />
               </div>
             ))}
           </div>
@@ -151,4 +176,8 @@ export default function MobileFeed() {
       )}
     </Screen>
   );
+}
+
+export default function MobileFeed() {
+  return <MobileFeedPage bucket="feed" />;
 }

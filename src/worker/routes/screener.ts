@@ -75,7 +75,8 @@ export async function applyBundleFlag(db: D1Database, accountId: string, contact
   await db.batch(stmts);
 }
 
-// Screening decisions are per contact row, i.e. per (account, email). Unified scope lists every account's queue.
+// Screening decisions apply user-wide (see scopeAccountIds), so the queue is grouped by sender email alone: a
+// sender who has landed in more than one of the user's connected accounts still gets a single card.
 screener.get("/", async (c) => {
   const db = c.env.DB;
   const t = now();
@@ -87,10 +88,10 @@ screener.get("/", async (c) => {
     .bind(...sc.params, t)
     .all<ThreadRow>();
   const threads = await threadsWithLabels(db, rows.results);
-  const keyOf = (accountId: string, email: string) => `${accountId}|${email}`;
+  const keyOf = (email: string) => email.toLowerCase();
   const byKey = new Map<string, typeof threads>();
   for (const th of threads) {
-    const key = keyOf(th.account_id, th.last_from.email);
+    const key = keyOf(th.last_from.email);
     const arr = byKey.get(key) ?? [];
     arr.push(th);
     byKey.set(key, arr);
@@ -102,9 +103,13 @@ screener.get("/", async (c) => {
       .prepare(`SELECT * FROM contacts WHERE account_id IN ${sc.sql} AND email IN (${part.map(() => "?").join(",")})`)
       .bind(...sc.params, ...part)
       .all<ContactRow>();
-    for (const r of cr.results) contacts.set(keyOf(r.account_id, r.email), r);
+    for (const r of cr.results) {
+      const key = keyOf(r.email);
+      const existing = contacts.get(key);
+      if (!existing || r.screen_status === "pending") contacts.set(key, r);
+    }
   }
-  // Latest message per sender for suggestion heuristics.
+  // Latest message per sender (across every account) for suggestion heuristics.
   const latest = new Map<string, MessageRow>();
   for (const part of chunk(rows.results.map((r) => r.id), 90)) {
     const ms = await db
@@ -112,8 +117,9 @@ screener.get("/", async (c) => {
       .bind(...part)
       .all<MessageRow>();
     for (const m of ms.results) {
-      const key = keyOf(m.account_id, m.from_email);
-      if (!latest.has(key)) latest.set(key, m);
+      const key = keyOf(m.from_email);
+      const existing = latest.get(key);
+      if (!existing || m.date > existing.date) latest.set(key, m);
     }
   }
   const senders = [...byKey.entries()]

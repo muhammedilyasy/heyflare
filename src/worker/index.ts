@@ -17,10 +17,14 @@ import composeRoutes from "./routes/compose";
 import bundleRoutes from "./routes/bundles";
 import aiRoutes from "./routes/ai";
 import { runLearning } from "./ai/memory";
+import { runMem0Sync } from "./ai/mem0";
 import domainRoutes from "./routes/domains";
+import oauthRoutes from "./routes/oauth";
 import calendarRoutes from "./routes/calendar";
 import { runCalendarSync } from "./calendar/sync";
 import { MAIL_SCOPE_SQL } from "./google";
+import { MS_MAIL_SCOPE_SQL } from "./microsoft";
+import { configuredProviders } from "./oauth";
 import { handleInboundEmail } from "./inbound";
 import { ensureMigrations } from "./migrations";
 import { VERSION, COMMIT, BUILT_AT } from "@shared/version";
@@ -35,19 +39,68 @@ app.onError((err, c) => {
 app.route("/auth", authRoutes);
 
 const api = new Hono<AppEnv>();
+
+/**
+ * Conditional GETs for JSON. The Imbox, counts and lists are polled every minute and mostly have
+ * not changed; with an ETag the browser sends `If-None-Match` and an unchanged answer is a 304 with
+ * no body. `no-cache` (not `no-store`) is what lets the browser keep the copy it revalidates
+ * against. Attachments set their own Cache-Control and are left alone, as is anything that is not
+ * JSON — hashing a multi-megabyte file to save nothing would be a poor trade.
+ */
+api.use("*", async (c, next) => {
+  await next();
+  if (c.req.method !== "GET" || c.res.status !== 200) return;
+  if (!/^application\/json/i.test(c.res.headers.get("content-type") ?? "")) return;
+  const body = await c.res.clone().arrayBuffer();
+  const digest = await crypto.subtle.digest("SHA-1", body);
+  const tag = `W/"${[...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("")}"`;
+  const headers = new Headers(c.res.headers);
+  headers.set("etag", tag);
+  if (!headers.has("cache-control")) headers.set("cache-control", "private, no-cache");
+  const match = c.req.header("if-none-match");
+  if (match && match.split(",").some((m) => m.trim() === tag)) {
+    c.res = new Response(null, { status: 304, headers });
+    return;
+  }
+  c.res = new Response(body, { status: 200, headers });
+});
+
 // Anonymous GET /api/me -> { user: null, registration_open } (used by the register page)
 api.get("/me", async (c, next) => {
   const user = await getSessionUser(c);
   if (user) return next();
   const n = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM users`).first<{ n: number }>();
-  return c.json({ user: null, accounts: [], setup_required: (n?.n ?? 0) === 0, google_configured: !!(c.env.GOOGLE_CLIENT_ID && c.env.GOOGLE_CLIENT_SECRET) });
+  const cfg = await configuredProviders(c.env);
+  return c.json({ user: null, accounts: [], setup_required: (n?.n ?? 0) === 0, google_configured: cfg.google, microsoft_configured: cfg.microsoft });
 });
 // What this deployment is running (used by the update check).
 api.get("/version", (c) => c.json({ version: VERSION, commit: COMMIT, built_at: BUILT_AT, latest: null }));
 api.use("*", requireUser);
+
+/**
+ * "Has any of my mail changed?" in one number: the newest `updated_at` across every thread the
+ * user owns. Sync bumps it when mail arrives, every action bumps it when mail moves, so a
+ * client that polls this every few seconds and refetches on a change sees what another client
+ * did within seconds — without asking for whole lists it already has. One index seek per
+ * account (idx_threads_account_updated), cheap enough to ask constantly.
+ */
+api.get("/changes", async (c) => {
+  const db = c.env.DB;
+  const accounts = await db.prepare(`SELECT id FROM accounts WHERE user_id = ?`).bind(c.get("user").id).all<{ id: string }>();
+  let revision = 0;
+  if (accounts.results.length > 0) {
+    const rows = await db.batch<{ r: number | null }>(
+      accounts.results.map((a) => db.prepare(`SELECT MAX(updated_at) AS r FROM threads WHERE account_id = ?`).bind(a.id))
+    );
+    for (const row of rows) revision = Math.max(revision, row.results[0]?.r ?? 0);
+  }
+  return c.json({ revision }, 200, { "cache-control": "private, no-store" });
+});
+
 api.route("/me", meRoutes);
 api.route("/accounts", accountRoutes);
 api.route("/domains", domainRoutes);
+api.route("/oauth", oauthRoutes);
 api.route("/ai", aiRoutes);
 api.route("/calendar", calendarRoutes);
 
@@ -87,6 +140,11 @@ async function runCron(env: Env) {
     console.error("scheduled sends failed", e);
   }
   try {
+    await runMem0Sync(env);
+  } catch (e) {
+    console.error("mem0 sync failed", e);
+  }
+  try {
     await runLearning(env);
   } catch (e) {
     console.error("ai learning failed", e);
@@ -110,6 +168,38 @@ async function runCron(env: Env) {
       await syncAccount(env, acc);
     } catch (e) {
       console.error("sync failed", acc.email, e);
+    }
+  }
+
+  // Outlook is a separate pass rather than a widened query: MAIL_SCOPE_SQL tests for a Gmail scope,
+  // so an Outlook row could never satisfy it.
+  const outlook = await db
+    .prepare(
+      `SELECT * FROM accounts WHERE provider = 'outlook' AND sync_status <> 'disconnected' AND refresh_token IS NOT NULL AND ${MS_MAIL_SCOPE_SQL} ORDER BY COALESCE(last_synced_at, 0) ASC LIMIT 8`
+    )
+    .all<AccountRow>();
+  for (const acc of outlook.results) {
+    if (acc.sync_status === "syncing" && acc.last_synced_at && Date.now() - acc.last_synced_at < 10 * 60_000) continue;
+    try {
+      await syncAccount(env, acc);
+    } catch (e) {
+      console.error("outlook sync failed", acc.email, e);
+    }
+  }
+
+  // IMAP mailboxes get their own pass too: they authenticate with a stored password, so the
+  // `refresh_token IS NOT NULL` predicate the OAuth providers rely on would exclude every one.
+  const imap = await db
+    .prepare(
+      `SELECT * FROM accounts WHERE provider = 'imap' AND sync_status <> 'disconnected' ORDER BY COALESCE(last_synced_at, 0) ASC LIMIT 8`
+    )
+    .all<AccountRow>();
+  for (const acc of imap.results) {
+    if (acc.sync_status === "syncing" && acc.last_synced_at && Date.now() - acc.last_synced_at < 10 * 60_000) continue;
+    try {
+      await syncAccount(env, acc);
+    } catch (e) {
+      console.error("imap sync failed", acc.email, e);
     }
   }
 }

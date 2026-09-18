@@ -14,7 +14,7 @@ import { CollectionPicker, LabelChip, LabelPicker, ThreadPicker } from "../compo
 import { bucketName } from "../components/BulkBar";
 import { Avatar, AvatarStack, AccountGlyph } from "../components/Avatar";
 import { ErrorState } from "../components/EmptyState";
-import { replyInitial, type ReplyMode } from "../pages/Thread";
+import { replyInitial, type ReplyMode } from "../lib/reply";
 import { fmtRelative, fmtSize, fmtTime } from "../lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -355,7 +355,7 @@ export default function MobileThread() {
         <AlertDialogContent size="sm">
           <AlertDialogHeader>
             <AlertDialogTitle>Delete this thread forever?</AlertDialogTitle>
-            <AlertDialogDescription>It'll be removed here and trashed in {account?.provider === "domain" ? "your mailbox" : "Gmail"}. There's no undo.</AlertDialogDescription>
+            <AlertDialogDescription>It'll be removed here and trashed in {account?.provider === "domain" || account?.provider === "imap" ? "your mailbox" : account?.provider === "outlook" ? "Outlook" : "Gmail"}. There's no undo.</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>

@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { BookOpen, ChevronLeft, ChevronRight, ChevronsUpDown } from "lucide-react";
+import { ChevronLeft, ChevronRight, ChevronsUpDown } from "lucide-react";
 import type { CalEvent } from "@shared/types";
 import { cn } from "@/lib/utils";
-import { invalidateCalendar, useCalendarSourceMutations, useEventMutations, useHabitMutations } from "../api";
+import { invalidateCalendar, useCalendarSourceMutations, useEventMutations } from "../api";
 import { CalendarProvider, useCalendar } from "../calendar/CalendarContext";
 import { EventBlock } from "../calendar/EventBlock";
 import { EventSheet } from "../calendar/EventSheet";
@@ -20,8 +20,8 @@ const HOLD_MS = 400;
 
 /**
  * One day, full screen. The same pieces the desktop day column carries — cover art, the day's
- * label, habits, all-day items, then the collapsing timeline — restacked vertically so a thumb
- * can reach them, with the day stepped by swiping rather than by scrolling a strip sideways.
+ * label, all-day items, then the collapsing timeline — restacked vertically so a thumb can reach
+ * them, with the day stepped by swiping rather than by scrolling a strip sideways.
  */
 export default function MobileDay() {
   return (
@@ -38,7 +38,6 @@ function DayScreen() {
   const qc = useQueryClient();
   const { cursor, setCursor, setView, view, range, eventsOn, openEvent } = useCalendar();
   const { syncAll } = useCalendarSourceMutations();
-  const habitMut = useHabitMutations();
 
   // The route is the source of truth here; the provider's cursor follows it so the loaded window
   // (and anything else reading `useCalendar()`) is anchored on the day actually on screen.
@@ -69,8 +68,6 @@ function DayScreen() {
   const committing = Math.abs(swipe.dx) >= (typeof window === "undefined" ? 9e9 : window.innerWidth * 0.9);
 
   const day = range?.days.find((d) => d.date === date);
-  const dow = keyToDate(date).getDay();
-  const habits = (range?.habits ?? []).filter((h) => !h.archived && (h.days.length === 0 || h.days.includes(dow)));
   const { allDay } = eventsOn(date);
 
   return (
@@ -117,37 +114,6 @@ function DayScreen() {
             </div>
           )}
           {day?.label && <div className="px-4 pt-2 text-[13px] font-medium">{day.label}</div>}
-
-          {habits.length > 0 && (
-            <div className="flex flex-wrap gap-1.5 px-4 pt-3">
-              {habits.map((h) => {
-                const done = h.completions?.includes(date) ?? false;
-                return (
-                  <button
-                    key={h.id}
-                    type="button"
-                    aria-pressed={done}
-                    onClick={() => habitMut.toggle.mutate({ id: h.id, date })}
-                    className={cn(
-                      "h-8 px-3 rounded-full border text-[12px] inline-flex items-center gap-1.5 active:opacity-70",
-                      done ? "bg-foreground text-background border-transparent" : "border-border text-muted-foreground",
-                    )}
-                  >
-                    <span className="leading-none">{h.icon || h.name.slice(0, 1).toUpperCase()}</span>
-                    <span className="leading-none">{h.name}</span>
-                    {!!h.streak && <span className="leading-none tnum opacity-70">{h.streak}</span>}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-
-          <Link to={`/journal/${date}`} className="mt-3 mx-4 flex items-center gap-2 h-10 rounded-lg bg-muted/50 px-3 active:bg-muted">
-            <BookOpen size={15} className="text-muted-foreground shrink-0" />
-            <span className="flex-1 text-[13px]">Journal</span>
-            <span className="text-[11px] text-muted-foreground">{day?.has_journal ? "Written" : "Empty"}</span>
-            <ChevronRight size={14} className="text-tertiary" />
-          </Link>
 
           {allDay.length > 0 && (
             <div className="mt-3 px-4 flex flex-col gap-1">

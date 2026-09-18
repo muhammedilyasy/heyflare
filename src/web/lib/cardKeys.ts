@@ -21,6 +21,14 @@ export function scrollPageBy(delta: number) {
   s.scrollBy({ top: step, behavior: "smooth" });
 }
 
+/** The card being read on a card page: the first `[data-feed-card]` still below the top bar. */
+export function cardBeingRead(): string | null {
+  for (const el of Array.from(document.querySelectorAll<HTMLElement>("[data-feed-card]"))) {
+    if (el.getBoundingClientRect().bottom > 44 + 24) return el.dataset.feedCard ?? null;
+  }
+  return null;
+}
+
 /**
  * Arrow keys on card layouts (The Feed, a bundle) scroll the page smoothly instead of hopping
  * between cards — these are made for reading, not triage.
@@ -71,10 +79,12 @@ export function useItemCursor({ count, onOpen, enabled = true }: { count: number
     setCursor((c) => (c >= count ? count - 1 : c));
   }, [count]);
 
+  // `count` is also a dependency: when the focused item is removed, the next one slides into the
+  // same cursor number, so the number alone wouldn't tell us to re-scroll to it.
   useEffect(() => {
     if (cursor < 0) return;
     document.querySelector(`[data-item-index="${cursor}"]`)?.scrollIntoView({ block: "nearest" });
-  }, [cursor]);
+  }, [cursor, count]);
 
   const step = (delta: number) => {
     if (overlayOpen()) return;

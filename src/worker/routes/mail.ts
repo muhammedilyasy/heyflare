@@ -33,7 +33,7 @@ mail.get("/counts", async (c) => {
     return db.prepare(sql).bind(...params).first<{ n: number }>();
   };
   const [screener, imbox, feed, paper, rl, sa] = await Promise.all([
-    q(`SELECT COUNT(DISTINCT t.account_id || '|' || t.last_from_email) AS n FROM threads t WHERE ${sc.sql} AND t.bucket = 'screener' AND ${VISIBLE}`),
+    q(`SELECT COUNT(DISTINCT LOWER(t.last_from_email)) AS n FROM threads t WHERE ${sc.sql} AND t.bucket = 'screener' AND ${VISIBLE}`),
     q(`SELECT (SELECT COUNT(*) FROM threads t WHERE ${sc.sql} AND t.bucket = 'imbox' AND t.bundle_id IS NULL AND t.seen = 0 AND t.reply_later = 0 AND t.set_aside = 0 AND ${VISIBLE})
              + (SELECT COUNT(*) FROM bundles b WHERE b.status = 'open' AND EXISTS (SELECT 1 FROM threads t WHERE t.bundle_id = b.id AND ${sc.sql} AND t.bucket = 'imbox' AND t.reply_later = 0 AND t.set_aside = 0 AND ${VISIBLE})) AS n`),
     q(`SELECT COUNT(*) AS n FROM threads t WHERE ${sc.sql} AND t.bucket = 'feed' AND t.seen = 0 AND ${VISIBLE}`),
@@ -64,23 +64,39 @@ mail.get("/imbox", async (c) => {
     db.prepare(`${base} AND t.bucket = 'imbox' AND t.bundle_id IS NULL AND t.seen = 1 AND t.reply_later = 0 AND t.set_aside = 0 ORDER BY t.last_message_at DESC LIMIT 200`).bind(...sc.params, t).all<ThreadRow>(),
     db.prepare(`${base} AND t.reply_later = 1 AND t.bucket <> 'trash' ORDER BY t.reply_later_at DESC LIMIT 100`).bind(...sc.params, t).all<ThreadRow>(),
     db.prepare(`${base} AND t.set_aside = 1 AND t.bucket <> 'trash' ORDER BY t.set_aside_at DESC LIMIT 100`).bind(...sc.params, t).all<ThreadRow>(),
-    db.prepare(`SELECT COUNT(DISTINCT t.account_id || '|' || t.last_from_email) AS n FROM threads t WHERE ${sc.sql} AND t.bucket = 'screener' AND ${VISIBLE}`).bind(...sc.params, t).first<{ n: number }>(),
+    db.prepare(`SELECT COUNT(DISTINCT LOWER(t.last_from_email)) AS n FROM threads t WHERE ${sc.sql} AND t.bucket = 'screener' AND ${VISIBLE}`).bind(...sc.params, t).first<{ n: number }>(),
     db
       .prepare(
+        // Grouped per account for the avatar lookup below; merged by email (across accounts) once results are back.
         `SELECT t.account_id, t.last_from_email AS email, MAX(t.last_from_name) AS name, COUNT(*) AS thread_count, MAX(t.last_message_at) AS latest
          FROM threads t WHERE ${sc.sql} AND t.bucket = 'screener' AND ${VISIBLE}
-         GROUP BY t.account_id, t.last_from_email ORDER BY latest DESC LIMIT 8`
+         GROUP BY t.account_id, t.last_from_email ORDER BY latest DESC LIMIT 24`
       )
       .bind(...sc.params, t)
-      .all<{ account_id: string; email: string; name: string; thread_count: number }>(),
+      .all<{ account_id: string; email: string; name: string; thread_count: number; latest: number }>(),
   ]);
+  const mergedSenders = new Map<string, { account_id: string; email: string; name: string; thread_count: number; latest: number }>();
+  for (const r of senders.results) {
+    const key = r.email.toLowerCase();
+    const existing = mergedSenders.get(key);
+    if (!existing) mergedSenders.set(key, { ...r });
+    else {
+      existing.thread_count += r.thread_count;
+      if (r.latest > existing.latest) {
+        existing.account_id = r.account_id;
+        existing.name = r.name;
+        existing.latest = r.latest;
+      }
+    }
+  }
+  const topSenders = [...mergedSenders.values()].sort((a, b) => b.latest - a.latest).slice(0, 8);
   const all = [...fresh.results, ...seen.results, ...rl.results, ...sa.results];
   const labels = await getLabelsForThreads(
     db,
     all.map((r) => r.id)
   );
   const map = (rows: ThreadRow[]) => rows.map((r) => toThreadSummary(r, labels.get(r.id) ?? []));
-  const senderPairs = senders.results.map((r) => ({ account_id: r.account_id, email: r.email }));
+  const senderPairs = topSenders.map((r) => ({ account_id: r.account_id, email: r.email }));
   const [newT, seenT, rlT, saT, senderAvatars] = await Promise.all([
     attachAvatars(db, map(fresh.results)),
     attachAvatars(db, map(seen.results)),
@@ -96,7 +112,7 @@ mail.get("/imbox", async (c) => {
     reply_later: rlT,
     set_aside: saT,
     screener_count: scr?.n ?? 0,
-    screener_senders: senders.results.map((r) => ({
+    screener_senders: topSenders.map((r) => ({
       account_id: r.account_id,
       email: r.email,
       name: r.name ?? "",
@@ -173,17 +189,19 @@ mail.get("/threads", async (c) => {
 });
 
 // ---------- Feed (with latest message) ----------
+// Shared by The Feed and Paper Trail: same full-card reading list, filtered to a different bucket.
 mail.get("/feed", async (c) => {
   const db = c.env.DB;
   const t = now();
   const sc = scope(c);
+  const bucket = c.req.query("bucket") === "paper_trail" ? "paper_trail" : "feed";
   const page = Math.max(0, parseInt(c.req.query("page") ?? "0", 10) || 0);
   const FEED_PAGE = 30;
-  // The Feed shows what you haven't marked done yet (seen = 0) by default; ?show=all includes everything.
+  // Shows what you haven't marked done yet (seen = 0) by default; ?show=all includes everything.
   const showAll = c.req.query("show") === "all";
   const rows = await db
-    .prepare(`SELECT t.* FROM threads t WHERE ${sc.sql} AND t.bucket = 'feed' AND ${VISIBLE}${showAll ? "" : " AND t.seen = 0"} ORDER BY t.last_message_at DESC LIMIT ? OFFSET ?`)
-    .bind(...sc.params, t, FEED_PAGE + 1, page * FEED_PAGE)
+    .prepare(`SELECT t.* FROM threads t WHERE ${sc.sql} AND t.bucket = ? AND ${VISIBLE}${showAll ? "" : " AND t.seen = 0"} ORDER BY t.last_message_at DESC LIMIT ? OFFSET ?`)
+    .bind(...sc.params, bucket, t, FEED_PAGE + 1, page * FEED_PAGE)
     .all<ThreadRow>();
   const hasMore = rows.results.length > FEED_PAGE;
   const list = rows.results.slice(0, FEED_PAGE);
@@ -621,7 +639,7 @@ mail.get("/messages/:id/attachments/:attId", async (c) => {
     "cache-control": "private, max-age=3600",
     "x-content-type-options": "nosniff",
   });
-  if (acc.provider === "domain") {
+  if (acc.provider !== "gmail") {
     const blob = await db.prepare(`SELECT data FROM attachment_blobs WHERE attachment_id = ?`).bind(att.id).first<{ data: unknown }>();
     const raw = blob?.data;
     // D1 hands BLOBs back as ArrayBuffer (remote) or number[] (local); normalize.
